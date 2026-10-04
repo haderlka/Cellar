@@ -3,7 +3,7 @@
 //! When a Cellar user copies cells, we write two clipboard formats:
 //! 1. A TSV string prefixed with a sentinel header for the system clipboard
 //!    so other apps see usable text and Cellar can detect formula-rich copies.
-//! 2. A JSON sidecar at `~/.cache/Cellar/clipboard.json` containing full cell
+//! 2. A JSON sidecar at `~/.cache/cellar/clipboard.json` containing full cell
 //!    data (formulas, formats, comments). Paste prefers the sidecar if it's
 //!    newer than the system clipboard's timestamp.
 //!
@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::CellData;
+use crate::infrastructure::app_dirs::cache_dir;
 
 /// Sentinel prefix added to TSV copies. Paste detects this and falls back to
 /// the sidecar JSON for full data.
@@ -32,16 +33,8 @@ pub struct SidecarClipboard {
     pub timestamp_ms: u128,
 }
 
-fn config_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let mut p = PathBuf::from(home);
-    p.push(".cache");
-    p.push("cellar");
-    Some(p)
-}
-
 fn path() -> Option<PathBuf> {
-    let mut p = config_dir()?;
+    let mut p = cache_dir()?;
     p.push("clipboard.json");
     Some(p)
 }
@@ -52,7 +45,7 @@ fn path() -> Option<PathBuf> {
 const MAX_SIDECAR_BYTES: usize = 1_000_000;
 
 pub fn write(cells: Vec<(usize, usize, CellData)>, source_row: usize, source_col: usize) {
-    let Some(dir) = config_dir() else { return; };
+    let Some(dir) = cache_dir() else { return; };
     let _ = std::fs::create_dir_all(&dir);
     let Some(path) = path() else { return; };
     let payload = SidecarClipboard {

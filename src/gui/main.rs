@@ -12,6 +12,8 @@
 //!   cellar --export-md IN [OUT.md]        all sheets as Markdown tables (values only)
 //!   cellar --export-charts IN [DIR] [--svg]
 //!                                         every chart as PNG (or SVG) into DIR
+//!   cellar --uninstall [--yes]            list (with --yes: remove) Cellar and
+//!                                         everything it stored; workbooks stay
 //! IN may be a .cellar or .xlsx file.
 
 // Windows: build as a GUI program so double-clicking cellar.exe doesn't open
@@ -29,13 +31,13 @@ mod shortcuts;
 mod sidebar;
 
 use eframe::egui;
-use cellar::infrastructure::{atomic, chart_image, fetcher, xlsx_convert, FileRepository};
+use cellar::infrastructure::{atomic, chart_image, fetcher, uninstall, xlsx_convert, FileRepository};
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(
         args.first().map(String::as_str),
-        Some("--convert" | "--export-md" | "--export-charts")
+        Some("--convert" | "--export-md" | "--export-charts" | "--uninstall")
     ) {
         attach_parent_console();
     }
@@ -43,6 +45,7 @@ fn main() -> eframe::Result {
         Some("--convert") => std::process::exit(convert_cli(&args[1..])),
         Some("--export-md") => std::process::exit(export_md_cli(&args[1..])),
         Some("--export-charts") => std::process::exit(export_charts_cli(&args[1..])),
+        Some("--uninstall") => std::process::exit(uninstall_cli(&args[1..])),
         _ => {}
     }
 
@@ -182,4 +185,44 @@ fn export_charts_cli(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `--uninstall [--yes]`: without `--yes`, list what would be removed; with
+/// it, remove Cellar's stored data, terminal links and the program itself.
+/// Workbooks are never touched. Exit code 1 if anything could not be removed.
+fn uninstall_cli(args: &[String]) -> i32 {
+    let yes = match args {
+        [] => false,
+        [flag] if flag == "--yes" => true,
+        _ => {
+            eprintln!("usage: cellar --uninstall [--yes]");
+            return 1;
+        }
+    };
+    let items = uninstall::plan();
+    if !yes {
+        println!("cellar --uninstall --yes removes:");
+        for item in &items {
+            println!("  {}  ({})", item.path.display(), item.what);
+        }
+        println!("Your workbooks are not touched. Quit Cellar first.");
+        return 0;
+    }
+    let mut failed = false;
+    for item in &items {
+        match uninstall::remove(item) {
+            Ok(()) => println!("Removed {}", item.path.display()),
+            Err(e) => {
+                failed = true;
+                eprintln!("Could not remove {}: {}", item.path.display(), e);
+                if cfg!(unix) && e.kind() == std::io::ErrorKind::PermissionDenied {
+                    eprintln!("  remove it with: sudo rm -r \"{}\"", item.path.display());
+                }
+            }
+        }
+    }
+    if cfg!(windows) && !failed {
+        println!("If you added Cellar's folder to PATH, remove it there too.");
+    }
+    i32::from(failed)
 }

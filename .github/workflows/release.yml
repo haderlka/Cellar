@@ -64,6 +64,7 @@ jobs:
         done
         iconutil -c icns Cellar.iconset -o "$APP/Contents/Resources/Cellar.icns"
 
+        # CFBundleIdentifier must match BUNDLE_ID in src/infrastructure/app_dirs.rs.
         cat > "$APP/Contents/Info.plist" <<EOF
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

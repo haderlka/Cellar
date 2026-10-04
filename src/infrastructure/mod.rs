@@ -3,6 +3,7 @@
 //! This module contains implementations for external concerns like
 //! file I/O, persistence, and other system-level operations.
 
+pub mod app_dirs;
 pub mod atomic;
 pub mod canonical_json;
 pub mod chart_image;
@@ -11,6 +12,7 @@ pub mod fetcher;
 pub mod recent;
 pub mod autosave;
 pub mod sidecar;
+pub mod uninstall;
 pub mod xlsx;
 pub mod xlsx_convert;
 pub mod xlsx_extras;

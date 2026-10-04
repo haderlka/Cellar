@@ -170,6 +170,20 @@ cellar --export-charts Budget.cellar          # PNGs into "Budget charts/"
 cellar --export-charts Budget.xlsx out --svg  # SVGs; works on .xlsx too
 ```
 
+### Uninstalling
+
+`cellar --uninstall` lists what would be removed: the program, the
+`cellar` terminal command if you linked one, and everything Cellar stored
+for itself (recent files, clipboard cache, on macOS the app's preferences).
+Your workbooks are not touched. Quit Cellar, then remove it all with:
+
+```bash
+cellar --uninstall --yes
+```
+
+On macOS, if `cellar` isn't on your `PATH`, run it from the app bundle:
+`/Applications/Cellar.app/Contents/MacOS/cellar --uninstall --yes`.
+
 ## Formulas
 
 Formulas use Excel syntax: `=SUM(A1:A10)`, `=IF(B2>0, "yes", "no")`,

@@ -49,6 +49,11 @@ epaint_default_fonts = "0.36.2"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSNotification", "NSObject", "NSString", "NSURL"] }
 
+# Windows: `cellar --uninstall` deletes the running cellar.exe, which
+# Windows only allows after the process exits.
+[target.'cfg(windows)'.dependencies]
+self-replace = "1.5"
+
 [dev-dependencies]
 resvg = "0.48.1"
 tempfile = "3.0"

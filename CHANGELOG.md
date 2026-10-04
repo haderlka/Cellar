@@ -13,6 +13,8 @@ history is in its repository.
   resizing, click-to-insert references while typing formulas, native file
   dialogs, drag & drop to open, Open Recent. On macOS, `.cellar` files
   open from Finder by double-click.
+- **`cellar --uninstall`** removes the program and everything Cellar stored
+  for itself (recent files, clipboard cache); workbooks stay.
 - **Fill handle** with Excel's behaviour: formulas shift, series continue
   (numbers, months, weekdays, quarters, numbered text), copy/series toggle,
   double-click fill down, Auto Fill Options, Ctrl+D / Ctrl+R.

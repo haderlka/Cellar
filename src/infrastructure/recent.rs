@@ -1,4 +1,4 @@
-//! Recent files list, persisted at `~/.config/Cellar/recent.json`.
+//! Recent files list, persisted at `~/.config/cellar/recent.json`.
 //!
 //! Keeps up to 10 entries, most-recent first. Failures (no $HOME, IO error,
 //! malformed JSON) degrade gracefully — recent-files is a UX nicety, not
@@ -6,18 +6,10 @@
 
 use std::path::PathBuf;
 
+use crate::infrastructure::app_dirs::config_dir;
+
 const MAX_ENTRIES: usize = 10;
 const FILE_NAME: &str = "recent.json";
-
-fn config_dir() -> Option<PathBuf> {
-    // Windows has no $HOME outside of shells like Git Bash; fall back to
-    // the user profile so the GUI started from Explorer finds the list.
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    let mut p = PathBuf::from(home);
-    p.push(".config");
-    p.push("cellar");
-    Some(p)
-}
 
 fn config_path() -> Option<PathBuf> {
     let mut p = config_dir()?;

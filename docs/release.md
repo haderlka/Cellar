@@ -95,6 +95,12 @@ first time. Paste this into the release text:
 > `xattr -dr com.apple.quarantine /Applications/Cellar.app` in Terminal.
 >
 > **Linux:** unpack the archive and run `./cellar`.
+>
+> **Uninstall:** `cellar --uninstall` lists what would be removed (the
+> program and Cellar's settings; never your workbooks), and
+> `cellar --uninstall --yes` removes it. On macOS run
+> `/Applications/Cellar.app/Contents/MacOS/cellar --uninstall --yes` if
+> `cellar` isn't on your `PATH`.
 
 Removing these warnings requires paid code signing: an Apple Developer
 account for signing and notarizing on macOS, and a code-signing certificate
@@ -104,7 +110,7 @@ on Windows (SignPath.io offers free signing for open-source projects).
 
 - **Windows command line.** `cellar.exe` is a GUI program, so double-clicking
   it opens no console window. The batch commands (`--convert`,
-  `--export-md`, `--export-charts`) attach to the console they were started
+  `--export-md`, `--export-charts`, `--uninstall`) attach to the console they were started
   from. `cmd` and PowerShell don't wait for GUI programs, so their output
   can appear after the next prompt and `%ERRORLEVEL%` / `$LASTEXITCODE` may
   not be set. To wait for the result, pipe it:
@@ -115,7 +121,9 @@ on Windows (SignPath.io offers free signing for open-source projects).
   build) come from `assets/logo.svg`. After changing the logo, run
   `cargo run --example render_icons` and commit the regenerated files.
 - **macOS minimum version** is 11 (Big Sur), set in the workflow's
-  `Info.plist`. The bundle identifier is `io.github.haderlka.cellar`.
+  `Info.plist`. The bundle identifier is `io.github.haderlka.cellar`; if
+  it changes, change `BUNDLE_ID` in `src/infrastructure/app_dirs.rs` too,
+  which `--uninstall` uses to find macOS's per-app files.
 - **macOS file types.** The `Info.plist` declares `.cellar` files
   (`io.github.haderlka.cellar.workbook`, a kind of JSON) as Cellar's own,
   so double-clicking one in Finder opens Cellar. Excel and CSV files list

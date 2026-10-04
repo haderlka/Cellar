@@ -46,6 +46,8 @@ src/
 │   ├── xlsx_pivot.rs        #   Excel PivotTable → PivotSpec
 │   ├── xlsx_convert.rs      #   Excel → Cellar conversion + verification report
 │   ├── chart_image.rs       #   charts → PNG/SVG (plotters)
+│   ├── app_dirs.rs          #   where Cellar stores its own files (config, cache)
+│   ├── uninstall.rs         #   `cellar --uninstall`: data, terminal links, program
 │   ├── recent.rs, sidecar.rs (rich clipboard), fetcher.rs (GET), atomic.rs, autosave.rs
 └── gui/                     # binary `cellar`
     ├── main.rs              #   startup, window icon, batch commands
@@ -92,6 +94,12 @@ every persisted field with a default gets `#[serde(default)]` (or
 non-`Default` values), so files only hold what the user changed and old
 files keep loading. This applies to new fields and new structs too.
 Renames need a migration step in `domain::models::migrate_workbook_json`.
+
+**App data.** Everything Cellar stores for itself (settings, caches,
+state) goes under `infrastructure::app_dirs::config_dir()` or `cache_dir()`,
+so `cellar --uninstall` removes it. A location that can't live there must be
+added to `app_dirs::data_locations`. `app_dirs::BUNDLE_ID` must match
+`CFBundleIdentifier` in `.github/workflows/release.yml`.
 
 **PivotTables and charts are definitions.** `PivotSpec` / `ChartSpec` are
 stored per sheet; results are computed when shown (`services::pivot`,
