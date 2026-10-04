@@ -10,11 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::NumberFormat;
-
-fn is_default<T: Default + PartialEq>(v: &T) -> bool {
-    *v == T::default()
-}
+use super::{is_default, NumberFormat};
 
 fn yes() -> bool {
     true

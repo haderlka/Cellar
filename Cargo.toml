@@ -43,6 +43,12 @@ quick-xml = "0.39"
 plotters = { version = "0.3.7", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "svg_backend", "ab_glyph", "line_series", "point_series"] }
 epaint_default_fonts = "0.36.2"
 
+# macOS: receive files opened from Finder (src/gui/open_files.rs). Same
+# versions eframe already uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSAppleEventManager", "NSNotification", "NSObject", "NSString", "NSURL"] }
+
 [dev-dependencies]
 resvg = "0.48.1"
 tempfile = "3.0"
@@ -51,3 +57,8 @@ tempfile = "3.0"
 name = "calc_engine"
 path = "benches/calc_engine.rs"
 harness = false
+
+[build-dependencies]
+# Embeds assets/icon.ico and version info into cellar.exe (Windows only;
+# see build.rs).
+winresource = "0.1.31"

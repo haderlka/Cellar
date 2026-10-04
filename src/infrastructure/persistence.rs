@@ -68,7 +68,7 @@ impl FileRepository {
                     "Invalid file format - top-level value is not an object".to_string()
                 })?;
                 let looks_like_workbook = obj.contains_key("sheets");
-                let looks_like_spreadsheet = obj.contains_key("cells") && obj.contains_key("rows");
+                let looks_like_spreadsheet = obj.contains_key("cells");
                 if !looks_like_workbook && !looks_like_spreadsheet {
                     return Err(
                         "Invalid file format - missing 'sheets' or 'cells' field; \
@@ -384,12 +384,12 @@ mod tests {
         let json_content = std::fs::read_to_string(file_path).expect("Failed to read file");
         let json_value: serde_json::Value = serde_json::from_str(&json_content).expect("Invalid JSON");
         
-        // Check that main fields exist
+        // Cells are always written; fields at their default are left out
         assert!(json_value.get("cells").is_some());
-        assert!(json_value.get("rows").is_some());
-        assert!(json_value.get("cols").is_some());
-        assert!(json_value.get("column_widths").is_some());
-        assert!(json_value.get("default_column_width").is_some());
+        assert!(json_value.get("rows").is_none());
+        assert!(json_value.get("cols").is_none());
+        assert!(json_value.get("default_column_width").is_none());
+        assert!(json_value.get("view_state").is_none());
         
         // Verify cells are stored as array format (due to custom serialization)
         let cells = json_value.get("cells").unwrap();

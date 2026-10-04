@@ -11,7 +11,8 @@ history is in its repository.
 - **Desktop GUI** (egui/eframe) for macOS, Windows and Linux: virtualized
   grid, formula bar, name box, sheet tabs, menus, mouse selection, column
   resizing, click-to-insert references while typing formulas, native file
-  dialogs, drag & drop to open, Open Recent.
+  dialogs, drag & drop to open, Open Recent. On macOS, `.cellar` files
+  open from Finder by double-click.
 - **Fill handle** with Excel's behaviour: formulas shift, series continue
   (numbers, months, weekdays, quarters, numbered text), copy/series toggle,
   double-click fill down, Auto Fill Options, Ctrl+D / Ctrl+R.

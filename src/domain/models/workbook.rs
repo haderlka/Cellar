@@ -153,6 +153,7 @@ pub struct Workbook {
     /// Index of the currently active sheet
     pub active_sheet: usize,
     /// Named ranges: name -> cell reference string (e.g., "Revenue" -> "B2:B50")
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub named_ranges: HashMap<String, String>,
     /// Iterative-calc toggle. When true, `iterative_calc_cyclic` runs over
     /// cyclic-remainder cells instead of stamping `#NUM!`. Workbook-wide
@@ -165,15 +166,15 @@ pub struct Workbook {
     /// so user choices now survive save/load. Files saved before the
     /// migration don't have the field and default to "off" — same
     /// behavior as before, so no silent regression.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub iterative_calc: bool,
     /// Max passes for iterative recalc. Default 100. See `iterative_calc`
     /// for serde-migration history.
-    #[serde(default = "default_iter_max")]
+    #[serde(default = "default_iter_max", skip_serializing_if = "is_default_iter_max")]
     pub iter_max: usize,
     /// Convergence epsilon (per-cell absolute numeric delta). Default 1e-6.
     /// See `iterative_calc` for serde-migration history.
-    #[serde(default = "default_iter_epsilon")]
+    #[serde(default = "default_iter_epsilon", skip_serializing_if = "is_default_iter_epsilon")]
     pub iter_epsilon: f64,
     /// Cells whose value may be stale. Populated by every mutation site
     /// (set/clear/structural-edit/sheet-rename/sheet-remove). Drained by
@@ -233,6 +234,8 @@ pub struct Workbook {
 
 pub(crate) fn default_iter_max() -> usize { 100 }
 pub(crate) fn default_iter_epsilon() -> f64 { 1e-6 }
+fn is_default_iter_max(v: &usize) -> bool { *v == default_iter_max() }
+fn is_default_iter_epsilon(v: &f64) -> bool { *v == default_iter_epsilon() }
 
 impl Default for Workbook {
     fn default() -> Self {

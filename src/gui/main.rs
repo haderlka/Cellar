@@ -14,10 +14,16 @@
 //!                                         every chart as PNG (or SVG) into DIR
 //! IN may be a .cellar or .xlsx file.
 
+// Windows: build as a GUI program so double-clicking cellar.exe doesn't open
+// a console window. The batch commands attach to the console they were
+// started from instead (`attach_parent_console`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod charts;
 mod dialogs;
 mod grid;
+mod open_files;
 mod pivot_ui;
 mod shortcuts;
 mod sidebar;
@@ -27,6 +33,12 @@ use cellar::infrastructure::{atomic, chart_image, fetcher, xlsx_convert, FileRep
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        args.first().map(String::as_str),
+        Some("--convert" | "--export-md" | "--export-charts")
+    ) {
+        attach_parent_console();
+    }
     match args.first().map(String::as_str) {
         Some("--convert") => std::process::exit(convert_cli(&args[1..])),
         Some("--export-md") => std::process::exit(export_md_cli(&args[1..])),
@@ -38,6 +50,8 @@ fn main() -> eframe::Result {
     // the domain layer reaches both through traits installed here.
     fetcher::install_as_http_fetcher();
     atomic::install_as_file_writer();
+    // macOS delivers files opened from Finder as events, not arguments.
+    open_files::install();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -55,6 +69,26 @@ fn main() -> eframe::Result {
         Box::new(move |cc| Ok(Box::new(app::GuiApp::new(cc, file)))),
     )
 }
+
+/// Windows GUI programs start without a console, so `println!` from the
+/// batch commands would go nowhere. Attach to the console of the shell that
+/// started us (if any); redirected output (`> file`, pipes) is unaffected.
+#[cfg(windows)]
+fn attach_parent_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn AttachConsole(process_id: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+    // SAFETY: plain Win32 call with no pointers; failure (no parent
+    // console) just leaves output unattached.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
 
 /// `--convert IN [OUT.cellar]`: batch conversion for scripts. An `.xlsx`
 /// input is converted and its verification report printed; a `.cellar`

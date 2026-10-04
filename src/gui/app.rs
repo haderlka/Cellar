@@ -69,6 +69,7 @@ pub struct GuiApp {
 impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, file: Option<String>) -> Self {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        crate::open_files::set_context(&cc.egui_ctx);
         let mut gui = Self {
             app: App::default(),
             edit: None,
@@ -1301,6 +1302,11 @@ impl eframe::App for GuiApp {
             } else {
                 self.open_path(path);
             }
+        }
+        // Files opened from Finder (macOS). The window holds one workbook,
+        // so open the first; ask to save unsaved changes first.
+        if let Some(path) = crate::open_files::take().into_iter().next() {
+            self.guarded(&ctx, Guarded::OpenPath(path));
         }
 
         self.handle_keys(&ctx);

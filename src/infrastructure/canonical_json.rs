@@ -21,8 +21,12 @@
 //!       [1, 2, {"formula": "=SUM(C2:C9)", "value": "1200.5"}],
 //! ```
 //!
+//! Fields at their default value are left out of the file: inside cells by
+//! `strip_defaults` below, everywhere else by `skip_serializing_if` on the
+//! model (paired with `#[serde(default)]` so loading fills them back in).
+//!
 //! The output is still plain JSON: it loads through the normal `serde_json`
-//! path, tshts can read it, and any JSON tool can process it.
+//! path and any JSON tool can process it.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -266,6 +270,35 @@ mod tests {
         assert!(out.contains("\n          \"values\": [{\"field\": \"Revenue\"}]\n"), "{}", out);
         let back: Workbook = serde_json::from_str(&out).unwrap();
         assert_eq!(back.sheets[0].pivots, vec![p]);
+    }
+
+    #[test]
+    fn default_workbook_and_sheet_fields_are_omitted() {
+        let out = to_canonical_string(&Workbook::default()).unwrap();
+        for key in [
+            "iterative_calc", "iter_max", "iter_epsilon", "named_ranges", "rows", "cols",
+            "column_widths", "default_column_width", "conditional_formats", "tables", "view_state",
+        ] {
+            assert!(!out.contains(&format!("\"{}\"", key)), "{} written: {}", key, out);
+        }
+    }
+
+    #[test]
+    fn non_default_workbook_and_sheet_fields_round_trip() {
+        let mut wb = Workbook { iterative_calc: true, iter_max: 50, iter_epsilon: 1e-9, ..Default::default() };
+        let sheet = wb.current_sheet_mut();
+        sheet.rows = 101;
+        sheet.cols = 27;
+        sheet.default_column_width = 10;
+        sheet.view_state.frozen_rows = 1;
+        let out = to_canonical_string(&wb).unwrap();
+        assert!(out.contains("\"frozen_rows\": 1") && !out.contains("frozen_cols"), "{}", out);
+        let back: Workbook = serde_json::from_str(&out).unwrap();
+        assert!(back.iterative_calc);
+        assert_eq!((back.iter_max, back.iter_epsilon), (50, 1e-9));
+        let s = &back.sheets[0];
+        assert_eq!((s.rows, s.cols, s.default_column_width), (101, 27, 10));
+        assert_eq!(s.view_state.frozen_rows, 1);
     }
 
     #[test]

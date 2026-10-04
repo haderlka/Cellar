@@ -223,8 +223,10 @@ without Cellar. tshts files use the same format: rename a `.tshts` file to
 cargo test                        # unit tests + end-to-end scenario tests
 cargo clippy --all-targets        # lints (kept warning-free)
 cargo bench --bench calc_engine   # recalculation benchmarks
-cargo run --example render_icons  # regenerate assets/icon-*.png from assets/logo.svg
+cargo run --example render_icons  # regenerate assets/icon-*.png and icon.ico from assets/logo.svg
 ```
+
+Releases are built by GitHub Actions; see [docs/release.md](docs/release.md).
 
 The code follows tshts' layered design:
 

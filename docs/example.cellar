@@ -1,9 +1,5 @@
 {
   "active_sheet": 0,
-  "iter_epsilon": 1e-6,
-  "iter_max": 100,
-  "iterative_calc": false,
-  "named_ranges": {},
   "next_sheet_id": 1,
   "sheet_ids": [
     0
@@ -100,16 +96,12 @@
           "type": "bar"
         }
       ],
-      "cols": 26,
       "column_widths": {
         "0": 12,
         "2": 12,
         "3": 12,
         "4": 12
       },
-      "conditional_formats": [],
-      "default_column_width": 8,
-      "named_ranges": {},
       "pivots": [
         {
           "columns": [{"field": "Month"}],
@@ -118,18 +110,7 @@
           "source": "A1:F13",
           "values": [{"field": "Revenue", "number_format": {"Number": {"decimals": 0, "thousands_sep": true}}}]
         }
-      ],
-      "rows": 100,
-      "tables": [],
-      "view_state": {
-        "filter_column": null,
-        "filter_value": null,
-        "frozen_cols": 0,
-        "frozen_rows": 0,
-        "hidden_cols": [],
-        "hidden_rows": [],
-        "validations": {}
-      }
+      ]
     }
   ],
   "version": 1

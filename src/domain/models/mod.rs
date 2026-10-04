@@ -15,6 +15,12 @@ mod workbook;
 mod dep_graph;
 mod pivot;
 
+/// `skip_serializing_if` helper: leave a field out of the saved file while
+/// it holds its type's default (the field also needs `#[serde(default)]`).
+pub(crate) fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
 pub use style::{NumberFormat, TerminalColor, CellStyle, CellFormat, format_cell_value};
 pub use refs::{
     replace_sheet_refs_with_ref_error,

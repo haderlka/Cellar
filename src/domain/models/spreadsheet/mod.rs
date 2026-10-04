@@ -11,26 +11,30 @@ pub struct Spreadsheet {
     #[serde(serialize_with = "serialize_cells", deserialize_with = "deserialize_cells")]
     pub cells: HashMap<(usize, usize), CellData>,
     /// Maximum number of rows in the spreadsheet
+    #[serde(default = "default_rows", skip_serializing_if = "is_default_rows")]
     pub rows: usize,
     /// Maximum number of columns in the spreadsheet
+    #[serde(default = "default_cols", skip_serializing_if = "is_default_cols")]
     pub cols: usize,
     /// Custom column widths for specific columns
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub column_widths: HashMap<usize, usize>,
     /// Default width for columns without custom widths
+    #[serde(default = "default_column_width", skip_serializing_if = "is_default_column_width")]
     pub default_column_width: usize,
     /// Named ranges resolvable inside formulas. Map keys are uppercase by
     /// convention. Synced from `Workbook::named_ranges` so per-sheet recalc
     /// can resolve names without needing workbook access.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub named_ranges: HashMap<String, String>,
     /// Conditional-formatting rules applied at render time. A rule fires for
     /// a cell when the cell is in `column_range` and the `predicate` formula
     /// (with `_` bound to the cell's value) evaluates truthy.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditional_formats: Vec<ConditionalFormat>,
     /// Tables defined on this sheet. Structured refs like `Table1[Col1]`
     /// resolve via this list.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<Table>,
     /// Conditional-format style cache, keyed by (row, col). Populated lazily
     /// on first lookup; invalidated wholesale on any cell mutation or rule
@@ -40,7 +44,7 @@ pub struct Spreadsheet {
     /// Persistent view state for this sheet. Save/load round-trips freezes,
     /// hidden rows/cols, filter criteria, and per-column data-validation
     /// rules so reopening a workbook restores the user's full workspace.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub view_state: SheetViewState,
     /// Charts placed on this sheet. Stored as definitions (type + source
     /// ranges), never as rendered output, so data edits don't touch them
@@ -81,28 +85,28 @@ impl Clone for Spreadsheet {
 
 /// Persistent per-sheet view state. The App keeps these on its struct for
 /// runtime convenience, but they're synced to/from this on save and load.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SheetViewState {
     /// Number of rows frozen at the top.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub frozen_rows: usize,
     /// Number of columns frozen on the left.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub frozen_cols: usize,
     /// Row indices hidden via `:hide` / filter. Stored as a sorted Vec so the
     /// serialized form is stable across runs (HashSet iteration order is not).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_rows: Vec<usize>,
     /// Column indices hidden via `:hide col E`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_cols: Vec<usize>,
     /// Active filter (column, criteria). Pair of None when no filter set.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_column: Option<usize>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_value: Option<String>,
     /// Per-column data validation predicates.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub validations: HashMap<usize, String>,
 }
 
@@ -173,14 +177,21 @@ pub struct ConditionalFormat {
     pub style: CellStyle,
 }
 
+fn default_rows() -> usize { 100 }
+fn default_cols() -> usize { 26 }
+fn default_column_width() -> usize { 8 }
+fn is_default_rows(v: &usize) -> bool { *v == default_rows() }
+fn is_default_cols(v: &usize) -> bool { *v == default_cols() }
+fn is_default_column_width(v: &usize) -> bool { *v == default_column_width() }
+
 impl Default for Spreadsheet {
     fn default() -> Self {
         Self {
             cells: HashMap::new(),
-            rows: 100,
-            cols: 26,
+            rows: default_rows(),
+            cols: default_cols(),
             column_widths: HashMap::new(),
-            default_column_width: 8,
+            default_column_width: default_column_width(),
             named_ranges: HashMap::new(),
             conditional_formats: Vec::new(),
             tables: Vec::new(),
