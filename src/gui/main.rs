@@ -19,6 +19,7 @@ mod charts;
 mod dialogs;
 mod grid;
 mod pivot_ui;
+mod shortcuts;
 mod sidebar;
 
 use eframe::egui;

@@ -16,6 +16,7 @@ use cellar::domain::{
 use cellar::infrastructure::{recent, xlsx, xlsx_convert, FileRepository};
 
 use crate::dialogs::Dialogs;
+use crate::shortcuts::Action;
 use crate::grid::GridState;
 
 pub const FORMULA_BAR_ID: &str = "formula_bar";
@@ -58,13 +59,16 @@ pub struct GuiApp {
     name_box: String,
     name_box_editing: bool,
     confirm: Option<Guarded>,
+    /// Excel's Insert/Delete dialog (Ctrl+Shift+= / Ctrl+-) when the
+    /// selection isn't whole rows or columns: (insert?, entire rows?).
+    structure_dialog: Option<(bool, bool)>,
     allow_close: bool,
     window_title: String,
 }
 
 impl GuiApp {
     pub fn new(cc: &eframe::CreationContext<'_>, file: Option<String>) -> Self {
-        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = true);
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut gui = Self {
             app: App::default(),
             edit: None,
@@ -76,6 +80,7 @@ impl GuiApp {
             name_box: String::new(),
             name_box_editing: false,
             confirm: None,
+            structure_dialog: None,
             allow_close: false,
             window_title: String::new(),
         };
@@ -432,58 +437,39 @@ impl GuiApp {
 
     fn handle_keys(&mut self, ctx: &Context) {
         let typing = ctx.egui_wants_keyboard_input();
-        let cmd = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
-        let cmd_shift = |key| KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, key);
+        let modal_open = self.dialogs.any_open() || self.pivots.any_dialog_open() || self.structure_dialog.is_some();
 
-        // Global shortcuts (work while typing too).
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::S))) {
-            self.save_as();
-        } else if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::S))) {
-            self.save();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::O))) {
-            self.guarded(ctx, Guarded::Open);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::N))) {
-            self.guarded(ctx, Guarded::New);
+        // Shortcut table (see shortcuts.rs). Bindings with more modifiers
+        // are tried first so Ctrl+Shift+9 isn't taken as Ctrl+9.
+        let mut bindings: Vec<(Action, KeyboardShortcut)> = Action::ALL
+            .iter()
+            .filter(|a| !a.bound_elsewhere())
+            .flat_map(|a| a.bindings(ctx).into_iter().map(move |k| (*a, k)))
+            .collect();
+        bindings.sort_by_key(|(_, k)| {
+            std::cmp::Reverse(
+                [k.modifiers.ctrl, k.modifiers.shift, k.modifiers.alt, k.modifiers.command, k.modifiers.mac_cmd]
+                    .iter()
+                    .filter(|m| **m)
+                    .count(),
+            )
+        });
+        let editing = self.edit.is_some();
+        for (action, shortcut) in &bindings {
+            let allowed = action.works_while_typing()
+                || (editing && matches!(action, Action::InsertDate | Action::InsertTime))
+                || (!typing && !editing && !modal_open);
+            if allowed && ctx.input_mut(|i| i.consume_shortcut(shortcut)) {
+                self.do_action(ctx, *action);
+            }
         }
 
         if self.edit.is_some() {
             self.handle_edit_keys(ctx, typing);
             return;
         }
-        if typing || self.dialogs.any_open() || self.pivots.any_dialog_open() {
+        if typing || modal_open {
             return;
-        }
-
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::Z)))
-            || ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::Y)))
-        {
-            self.app.redo();
-        } else if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::Z))) {
-            self.app.undo();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::B))) {
-            self.app.toggle_bold();
-        }
-        // Excel: Ctrl+D fills down, Ctrl+R fills right.
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::D))) {
-            self.app.fill_down_or_right(true);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::R))) {
-            self.app.fill_down_or_right(false);
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::U))) {
-            self.app.toggle_underline();
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::A))) {
-            let sheet = self.app.workbook.current_sheet();
-            self.app.selection_start = Some((0, 0));
-            self.app.selection_end = Some((sheet.rows - 1, sheet.cols - 1));
-        }
-        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::Home))) {
-            self.set_cursor(0, 0);
-            self.grid.scroll_to_cursor = true;
         }
 
         let mut start_text: Option<String> = None;
@@ -494,7 +480,11 @@ impl GuiApp {
                     egui::Event::Copy => clipboard_op = Some("copy"),
                     egui::Event::Cut => clipboard_op = Some("cut"),
                     egui::Event::Paste(_) => clipboard_op = Some("paste"),
-                    egui::Event::Text(t) if !i.modifiers.command => {
+                    // Typing starts an edit; chords with Ctrl/⌘ don't, and
+                    // neither does a space typed with Shift (Select Row).
+                    egui::Event::Text(t)
+                        if !i.modifiers.command && !i.modifiers.ctrl && !(i.modifiers.shift && t == " ") =>
+                    {
                         start_text.get_or_insert_with(String::new).push_str(t);
                     }
                     _ => {}
@@ -503,7 +493,7 @@ impl GuiApp {
             let keys = [
                 Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight, Key::Enter,
                 Key::Tab, Key::F2, Key::Delete, Key::Backspace, Key::PageUp, Key::PageDown,
-                Key::Home, Key::Escape,
+                Key::Home, Key::End, Key::Escape,
             ];
             let pressed: Vec<Key> = keys.into_iter().filter(|k| i.key_pressed(*k)).collect();
             // Tab would otherwise move keyboard focus to the formula bar.
@@ -522,8 +512,14 @@ impl GuiApp {
             _ => {}
         }
         let shift = mods.shift;
+        // Excel: Ctrl+Arrow (⌘+Arrow on Mac) jumps to the edge of the data.
+        let jump = mods.command;
         for key in pressed {
             match key {
+                Key::ArrowUp if jump => self.jump_edge(-1, 0, shift),
+                Key::ArrowDown if jump => self.jump_edge(1, 0, shift),
+                Key::ArrowLeft if jump => self.jump_edge(0, -1, shift),
+                Key::ArrowRight if jump => self.jump_edge(0, 1, shift),
                 Key::ArrowUp => self.move_cursor(-1, 0, shift),
                 Key::ArrowDown => self.move_cursor(1, 0, shift),
                 Key::ArrowLeft => self.move_cursor(0, -1, shift),
@@ -532,9 +528,18 @@ impl GuiApp {
                 Key::PageDown => self.move_cursor(25, 0, shift),
                 Key::Enter => self.move_cursor(if shift { -1 } else { 1 }, 0, false),
                 Key::Tab => self.move_cursor(0, if shift { -1 } else { 1 }, false),
+                Key::Home if jump => {
+                    self.set_cursor(0, 0);
+                    self.grid.scroll_to_cursor = true;
+                }
                 Key::Home => {
                     let r = self.app.selected_row;
                     self.set_cursor(r, 0);
+                    self.grid.scroll_to_cursor = true;
+                }
+                Key::End if jump => {
+                    let (r, c) = self.last_used_cell();
+                    self.set_cursor(r, c);
                     self.grid.scroll_to_cursor = true;
                 }
                 Key::F2 => self.start_edit(None, true),
@@ -549,6 +554,22 @@ impl GuiApp {
     }
 
     fn handle_edit_keys(&mut self, ctx: &Context, typing: bool) {
+        // Excel: Ctrl+Enter puts the entry into every selected cell.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
+            ctx.memory_mut(|m| {
+                m.surrender_focus(egui::Id::new(FORMULA_BAR_ID));
+                m.surrender_focus(egui::Id::new(crate::grid::CELL_EDITOR_ID));
+            });
+            let range = self.app.get_selection_range();
+            let at = self.edit.as_ref().map(|e| (e.row, e.col));
+            self.commit_edit(EditMove::Stay);
+            if let (Some(range), Some(at)) = (range, at) {
+                self.app.fill_block_from(at, range);
+                self.app.selection_start = Some(range.0);
+                self.app.selection_end = Some(range.1);
+            }
+            return;
+        }
         let (enter, tab, esc, shift) = ctx.input_mut(|i| {
             let shift = i.modifiers.shift;
             let enter = i.consume_key(Modifiers::NONE, Key::Enter)
@@ -596,12 +617,8 @@ impl GuiApp {
     fn menu_bar(&mut self, ctx: &Context, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.add(Button::new("New").shortcut_text(ctx.format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::N)))).clicked() {
-                    self.guarded(ctx, Guarded::New);
-                }
-                if ui.add(Button::new("Open…").shortcut_text(ctx.format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O)))).clicked() {
-                    self.guarded(ctx, Guarded::Open);
-                }
+                self.menu_item(ui, ctx, Action::New);
+                self.menu_item(ui, ctx, Action::Open);
                 ui.menu_button("Open Recent", |ui| {
                     let files = recent::load();
                     if files.is_empty() {
@@ -623,16 +640,10 @@ impl GuiApp {
                         }
                     }
                 });
-                if ui.button("Import Excel workbook…").clicked() {
-                    self.guarded(ctx, Guarded::ImportExcel);
-                }
+                self.menu_item(ui, ctx, Action::ImportExcel);
                 ui.separator();
-                if ui.add(Button::new("Save").shortcut_text(ctx.format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S)))).clicked() {
-                    self.save();
-                }
-                if ui.add(Button::new("Save As…").shortcut_text(ctx.format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S)))).clicked() {
-                    self.save_as();
-                }
+                self.menu_item(ui, ctx, Action::Save);
+                self.menu_item(ui, ctx, Action::SaveAs);
                 ui.separator();
                 ui.menu_button("Export", |ui| {
                     if ui.button("Excel workbook (.xlsx)…").clicked() {
@@ -657,132 +668,403 @@ impl GuiApp {
                     }
                 });
                 ui.separator();
-                if ui.button("Quit").clicked() {
-                    self.guarded(ctx, Guarded::Quit);
-                }
+                self.menu_item(ui, ctx, Action::Quit);
             });
             ui.menu_button("Edit", |ui| {
-                if ui.button("Undo").clicked() {
-                    self.app.undo();
-                }
-                if ui.button("Redo").clicked() {
-                    self.app.redo();
+                for a in [Action::Undo, Action::Redo] {
+                    self.menu_item(ui, ctx, a);
                 }
                 ui.separator();
-                if ui.button("Cut").clicked() {
-                    self.app.cut_selection();
-                }
-                if ui.button("Copy").clicked() {
-                    self.app.copy_selection();
-                }
-                if ui.button("Paste").clicked() {
-                    self.app.paste();
-                }
-                if ui.button("Clear contents").clicked() {
-                    self.app.clear_selection_contents();
+                for a in [Action::Cut, Action::Copy, Action::Paste, Action::ClearContents, Action::CopyMarkdown] {
+                    self.menu_item(ui, ctx, a);
                 }
                 ui.separator();
-                if ui.button("Copy selection as Markdown table").clicked() {
-                    self.copy_selection_markdown(ui.ctx());
+                for a in [Action::FillDown, Action::FillRight, Action::FillSeries] {
+                    self.menu_item(ui, ctx, a);
                 }
                 ui.separator();
-                if ui.add(Button::new("Fill Down").shortcut_text(ctx.format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::D)))).clicked() {
-                    self.app.fill_down_or_right(true);
+                for a in [Action::InsertCells, Action::DeleteCells] {
+                    self.menu_item(ui, ctx, a);
                 }
-                if ui.add(Button::new("Fill Right").shortcut_text(ctx.format_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::R)))).clicked() {
-                    self.app.fill_down_or_right(false);
-                }
-                if ui.button("Fill selection (continue series)").clicked() {
-                    self.app.autofill_selection();
+                self.row_col_buttons(ui, ctx);
+                ui.separator();
+                for a in [Action::SelectRow, Action::SelectColumn, Action::SelectAll] {
+                    self.menu_item(ui, ctx, a);
                 }
                 ui.separator();
-                self.row_col_buttons(ui);
+                for a in [Action::InsertDate, Action::InsertTime] {
+                    self.menu_item(ui, ctx, a);
+                }
             });
-            ui.menu_button("Format", |ui| self.format_menu(ui));
+            ui.menu_button("Format", |ui| self.format_menu(ui, ctx));
             ui.menu_button("Data", |ui| {
-                if ui.button("Sort column A-Z").clicked() {
-                    self.app.sort_column_asc();
-                }
-                if ui.button("Sort column Z-A").clicked() {
-                    self.app.sort_column_desc();
-                }
+                self.menu_item(ui, ctx, Action::AutoSum);
                 ui.separator();
-                if ui.button("PivotTable…").clicked() {
-                    self.open_create_pivot();
-                }
-                if ui.button("Insert chart…").clicked() {
-                    self.open_chart_dialog(None);
-                }
+                self.menu_item(ui, ctx, Action::SortAscending);
+                self.menu_item(ui, ctx, Action::SortDescending);
                 ui.separator();
-                if ui.button("Recalculate all").clicked() {
-                    self.app.recalc_all();
-                }
+                self.menu_item(ui, ctx, Action::PivotTable);
+                self.menu_item(ui, ctx, Action::InsertChart);
+                ui.separator();
+                self.menu_item(ui, ctx, Action::Recalculate);
             });
             ui.menu_button("Sheet", |ui| {
-                if ui.button("New sheet").clicked() {
-                    self.run_command("sheet new");
+                for a in [Action::NewSheet, Action::RenameSheet, Action::DeleteSheet] {
+                    self.menu_item(ui, ctx, a);
                 }
-                if ui.button("Rename sheet…").clicked() {
-                    self.dialogs.open_rename(&self.app);
-                }
-                let can_delete = self.app.workbook.sheets.len() > 1;
-                if ui.add_enabled(can_delete, Button::new("Delete sheet")).clicked() {
-                    self.run_command("sheet delete");
+                ui.separator();
+                for a in [Action::NextSheet, Action::PreviousSheet] {
+                    self.menu_item(ui, ctx, a);
                 }
             });
             ui.menu_button("View", |ui| {
-                ui.checkbox(&mut self.show_sidebar, "Sidebar (PivotTables & charts)");
+                ui.checkbox(&mut self.show_sidebar, Action::ToggleSidebar.label());
+                ui.separator();
+                for a in [Action::ZoomIn, Action::ZoomOut, Action::ZoomReset] {
+                    self.menu_item(ui, ctx, a);
+                }
             });
             ui.menu_button("Help", |ui| {
-                if ui.button("Keyboard shortcuts & formulas").clicked() {
-                    self.dialogs.help = true;
-                }
+                self.menu_item(ui, ctx, Action::Help);
                 ui.separator();
-                if ui.button("About Cellar").clicked() {
-                    self.dialogs.about = true;
-                }
+                self.menu_item(ui, ctx, Action::About);
             });
         });
     }
 
-    pub fn row_col_buttons(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Insert row above").clicked() {
-            self.app.insert_row();
-        }
-        if ui.button("Delete row").clicked() {
-            self.app.delete_row();
-        }
-        if ui.button("Insert column left").clicked() {
-            self.app.insert_col();
-        }
-        if ui.button("Delete column").clicked() {
-            self.app.delete_col();
+    /// A menu button for `action`, with its shortcut shown on the right.
+    pub fn menu_item(&mut self, ui: &mut egui::Ui, ctx: &Context, action: Action) {
+        let enabled = match action {
+            Action::DeleteSheet => self.app.workbook.sheets.len() > 1,
+            Action::NextSheet => self.app.workbook.active_sheet + 1 < self.app.workbook.sheets.len(),
+            Action::PreviousSheet => self.app.workbook.active_sheet > 0,
+            _ => true,
+        };
+        let button = Button::new(action.label()).shortcut_text(action.shortcut_text(ctx));
+        if ui.add_enabled(enabled, button).clicked() {
+            self.do_action(ctx, action);
         }
     }
 
-    fn format_menu(&mut self, ui: &mut egui::Ui) {
-        if ui.button("Bold").clicked() {
-            self.app.toggle_bold();
+    pub fn row_col_buttons(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+        for a in [Action::InsertRows, Action::DeleteRows, Action::InsertColumns, Action::DeleteColumns] {
+            self.menu_item(ui, ctx, a);
         }
-        if ui.button("Underline").clicked() {
-            self.app.toggle_underline();
-        }
+    }
+
+    fn format_menu(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+        self.menu_item(ui, ctx, Action::Bold);
+        self.menu_item(ui, ctx, Action::Underline);
         ui.separator();
-        ui.menu_button("Number format", |ui| {
-            for (label, fmt) in number_formats() {
+        ui.menu_button("Number Format", |ui| {
+            for a in [Action::FormatGeneral, Action::FormatNumber, Action::FormatCurrency, Action::FormatPercent] {
+                self.menu_item(ui, ctx, a);
+            }
+            ui.separator();
+            for (label, fmt) in number_formats().into_iter().skip(1) {
                 if ui.button(label).clicked() {
                     self.app.set_selection_format(fmt);
                 }
             }
         });
-        ui.menu_button("Text color", |ui| self.color_choices(ui, false));
-        ui.menu_button("Fill color", |ui| self.color_choices(ui, true));
+        ui.menu_button("Text Color", |ui| self.color_choices(ui, false));
+        ui.menu_button("Fill Color", |ui| self.color_choices(ui, true));
         ui.separator();
-        if ui.button("Auto-fit column width").clicked() {
-            let c = self.app.selected_col;
-            self.app.workbook.current_sheet_mut().auto_resize_column(c);
-            self.app.dirty = true;
+        ui.menu_button("Hide & Unhide", |ui| {
+            for a in [Action::HideRows, Action::UnhideRows, Action::HideColumns, Action::UnhideColumns] {
+                self.menu_item(ui, ctx, a);
+            }
+        });
+        self.menu_item(ui, ctx, Action::AutoFitColumn);
+    }
+
+    /// Run a menu command / shortcut.
+    pub fn do_action(&mut self, ctx: &Context, action: Action) {
+        match action {
+            Action::New => self.guarded(ctx, Guarded::New),
+            Action::Open => self.guarded(ctx, Guarded::Open),
+            Action::ImportExcel => self.guarded(ctx, Guarded::ImportExcel),
+            Action::Save => self.save(),
+            Action::SaveAs => self.save_as(),
+            Action::Quit => self.guarded(ctx, Guarded::Quit),
+            Action::Undo => {
+                self.commit_edit(EditMove::Stay);
+                self.app.undo();
+            }
+            Action::Redo => {
+                self.commit_edit(EditMove::Stay);
+                self.app.redo();
+            }
+            Action::Cut => self.app.cut_selection(),
+            Action::Copy => self.app.copy_selection(),
+            Action::Paste => {
+                self.app.paste();
+                self.ensure_sheet_size();
+            }
+            Action::ClearContents => self.app.clear_selection_contents(),
+            Action::CopyMarkdown => self.copy_selection_markdown(ctx),
+            Action::FillDown => self.app.fill_down_or_right(true),
+            Action::FillRight => self.app.fill_down_or_right(false),
+            Action::FillSeries => self.app.autofill_selection(),
+            Action::InsertCells => self.insert_or_delete(true),
+            Action::DeleteCells => self.insert_or_delete(false),
+            Action::InsertRows => self.apply_structure(true, true),
+            Action::DeleteRows => self.apply_structure(false, true),
+            Action::InsertColumns => self.apply_structure(true, false),
+            Action::DeleteColumns => self.apply_structure(false, false),
+            Action::SelectRow => {
+                let ((r0, _), (r1, _)) = self.selection_or_cursor();
+                let last = self.app.workbook.current_sheet().cols - 1;
+                self.app.selection_start = Some((r0, 0));
+                self.app.selection_end = Some((r1, last));
+            }
+            Action::SelectColumn => {
+                let ((_, c0), (_, c1)) = self.selection_or_cursor();
+                let last = self.app.workbook.current_sheet().rows - 1;
+                self.app.selection_start = Some((0, c0));
+                self.app.selection_end = Some((last, c1));
+            }
+            Action::SelectAll => {
+                let sheet = self.app.workbook.current_sheet();
+                self.app.selection_start = Some((0, 0));
+                self.app.selection_end = Some((sheet.rows - 1, sheet.cols - 1));
+            }
+            Action::InsertDate | Action::InsertTime => self.insert_now(action == Action::InsertDate),
+            Action::Bold => self.app.toggle_bold(),
+            Action::Underline => self.app.toggle_underline(),
+            Action::FormatGeneral => self.app.set_selection_format(NumberFormat::General),
+            Action::FormatNumber => {
+                self.app.set_selection_format(NumberFormat::Number { decimals: 2, thousands_sep: true })
+            }
+            Action::FormatCurrency => {
+                self.app.set_selection_format(NumberFormat::Currency { symbol: "$".into(), decimals: 2 })
+            }
+            Action::FormatPercent => self.app.set_selection_format(NumberFormat::Percentage { decimals: 0 }),
+            Action::HideRows | Action::UnhideRows | Action::HideColumns | Action::UnhideColumns => {
+                self.hide_unhide(action)
+            }
+            Action::AutoFitColumn => {
+                let ((_, c0), (_, c1)) = self.selection_or_cursor();
+                for c in c0..=c1.min(c0 + 200) {
+                    self.app.workbook.current_sheet_mut().auto_resize_column(c);
+                }
+                self.app.dirty = true;
+            }
+            Action::AutoSum => self.auto_sum(),
+            Action::SortAscending => self.app.sort_column_asc(),
+            Action::SortDescending => self.app.sort_column_desc(),
+            Action::PivotTable => self.open_create_pivot(),
+            Action::InsertChart => self.open_chart_dialog(None),
+            Action::Recalculate => self.app.recalc_all(),
+            Action::NewSheet => self.run_command("sheet new"),
+            Action::NextSheet | Action::PreviousSheet => {
+                let n = self.app.workbook.sheets.len();
+                let cur = self.app.workbook.active_sheet;
+                let to = if action == Action::NextSheet { (cur + 1).min(n - 1) } else { cur.saturating_sub(1) };
+                if to != cur {
+                    self.commit_edit(EditMove::Stay);
+                    self.app.snapshot_view_state_to_active_sheet();
+                    self.app.switch_to_sheet(to);
+                    self.app.restore_view_state_from_active_sheet();
+                    self.grid = GridState::default();
+                }
+            }
+            Action::RenameSheet => self.dialogs.open_rename(&self.app),
+            Action::DeleteSheet => self.run_command("sheet delete"),
+            Action::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
+            Action::ZoomIn => ctx.set_zoom_factor((ctx.zoom_factor() * 1.1).min(3.0)),
+            Action::ZoomOut => ctx.set_zoom_factor((ctx.zoom_factor() / 1.1).max(0.5)),
+            Action::ZoomReset => ctx.set_zoom_factor(1.0),
+            Action::Help => self.dialogs.help = true,
+            Action::About => self.dialogs.about = true,
         }
+    }
+
+    /// Excel's Ctrl+Shift+= / Ctrl+-: whole rows or columns selected are
+    /// inserted/deleted directly; otherwise the Insert/Delete dialog asks.
+    fn insert_or_delete(&mut self, insert: bool) {
+        let ((r0, c0), (r1, c1)) = self.selection_or_cursor();
+        let sheet = self.app.workbook.current_sheet();
+        let whole_rows = c0 == 0 && c1 + 1 >= sheet.cols;
+        let whole_cols = r0 == 0 && r1 + 1 >= sheet.rows;
+        if whole_rows || whole_cols {
+            self.apply_structure(insert, whole_rows);
+        } else {
+            self.structure_dialog = Some((insert, true));
+        }
+    }
+
+    /// Insert/delete as many rows (or columns) as the selection spans.
+    fn apply_structure(&mut self, insert: bool, rows: bool) {
+        self.commit_edit(EditMove::Stay);
+        let ((r0, c0), (r1, c1)) = self.selection_or_cursor();
+        match (insert, rows) {
+            (true, true) => self.app.insert_rows(r0, r1 - r0 + 1),
+            (false, true) => self.app.delete_rows(r0, r1 - r0 + 1),
+            (true, false) => self.app.insert_cols(c0, c1 - c0 + 1),
+            (false, false) => self.app.delete_cols(c0, c1 - c0 + 1),
+        }
+    }
+
+    fn structure_dialog_ui(&mut self, ctx: &Context) {
+        let Some((insert, mut rows)) = self.structure_dialog else { return };
+        let mut done = None;
+        egui::Modal::new(egui::Id::new("insert_delete")).show(ctx, |ui| {
+            ui.heading(if insert { "Insert" } else { "Delete" });
+            ui.radio_value(&mut rows, true, "Entire row");
+            ui.radio_value(&mut rows, false, "Entire column");
+            ui.label(
+                RichText::new("Cellar inserts and deletes whole rows or columns; shifting single cells isn't supported.")
+                    .weak()
+                    .small(),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+                    done = Some(true);
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                    done = Some(false);
+                }
+            });
+        });
+        self.structure_dialog = Some((insert, rows));
+        match done {
+            Some(true) => {
+                self.structure_dialog = None;
+                self.apply_structure(insert, rows);
+            }
+            Some(false) => self.structure_dialog = None,
+            None => {}
+        }
+    }
+
+    /// Excel's Ctrl+9 / Ctrl+0 and their Shift variants.
+    fn hide_unhide(&mut self, action: Action) {
+        let ((r0, c0), (r1, c1)) = self.selection_or_cursor();
+        match action {
+            Action::HideRows => self.app.hidden_rows.extend(r0..=r1),
+            Action::HideColumns => self.app.hidden_cols.extend(c0..=c1),
+            Action::UnhideRows => {
+                // Unhide within the selection; with nothing hidden there,
+                // unhide everything.
+                let before = self.app.hidden_rows.len();
+                self.app.hidden_rows.retain(|r| !(r0..=r1).contains(r));
+                if self.app.hidden_rows.len() == before {
+                    self.app.hidden_rows.clear();
+                }
+            }
+            Action::UnhideColumns => {
+                let before = self.app.hidden_cols.len();
+                self.app.hidden_cols.retain(|c| !(c0..=c1).contains(c));
+                if self.app.hidden_cols.len() == before {
+                    self.app.hidden_cols.clear();
+                }
+            }
+            _ => return,
+        }
+        self.app.dirty = true;
+    }
+
+    /// Excel's Alt+=: start a SUM over the numbers directly above the
+    /// cursor (or to its left), ready to confirm with Enter.
+    fn auto_sum(&mut self) {
+        self.commit_edit(EditMove::Stay);
+        let (r, c) = (self.app.selected_row, self.app.selected_col);
+        let sheet = self.app.workbook.current_sheet();
+        let is_num = |r: usize, c: usize| sheet.get_cell(r, c).value.trim().parse::<f64>().is_ok();
+        let label = |r: usize, c: usize| format!("{}{}", Spreadsheet::column_label(c), r + 1);
+        let mut top = r;
+        while top > 0 && is_num(top - 1, c) {
+            top -= 1;
+        }
+        let formula = if top < r {
+            format!("=SUM({}:{})", label(top, c), label(r - 1, c))
+        } else {
+            let mut left = c;
+            while left > 0 && is_num(r, left - 1) {
+                left -= 1;
+            }
+            if left < c { format!("=SUM({}:{})", label(r, left), label(r, c - 1)) } else { "=SUM()".to_string() }
+        };
+        self.start_edit(Some(formula), true);
+    }
+
+    /// Excel's Ctrl+; (date) and Ctrl+Shift+; (time): typed into the cell
+    /// being edited, or start an edit with it.
+    fn insert_now(&mut self, date: bool) {
+        let serial = cellar::domain::parser::now_serial();
+        let text = if date {
+            let (y, m, d) = cellar::domain::parser::serial_to_date_pub(serial);
+            format!("{:04}-{:02}-{:02}", y, m, d)
+        } else {
+            let mins = ((serial.fract() * 1440.0).round() as u32) % 1440;
+            format!("{:02}:{:02}", mins / 60, mins % 60)
+        };
+        match &mut self.edit {
+            Some(e) => {
+                e.text.push_str(&text);
+                e.focus_pending = true;
+            }
+            None => self.start_edit(Some(text), true),
+        }
+    }
+
+    /// Excel's Ctrl+Arrow: jump to the edge of the current block of data,
+    /// or to the next filled cell, or to the sheet's edge.
+    fn jump_edge(&mut self, dr: isize, dc: isize, extend: bool) {
+        let sheet = self.app.workbook.current_sheet();
+        let filled = |r: usize, c: usize| sheet.cells.get(&(r, c)).is_some_and(|cd| !cd.value.is_empty());
+        let start = if extend {
+            self.app.selection_end.unwrap_or((self.app.selected_row, self.app.selected_col))
+        } else {
+            (self.app.selected_row, self.app.selected_col)
+        };
+        let (max_r, max_c) = (sheet.rows - 1, sheet.cols - 1);
+        let step = |(r, c): (usize, usize)| -> Option<(usize, usize)> {
+            let nr = r as isize + dr;
+            let nc = c as isize + dc;
+            (nr >= 0 && nc >= 0 && nr as usize <= max_r && nc as usize <= max_c).then_some((nr as usize, nc as usize))
+        };
+        let mut pos = start;
+        match step(pos) {
+            None => {}
+            Some(next) if filled(pos.0, pos.1) && filled(next.0, next.1) => {
+                // Inside a block: run to its last filled cell.
+                pos = next;
+                while let Some(n) = step(pos).filter(|n| filled(n.0, n.1)) {
+                    pos = n;
+                }
+            }
+            Some(next) => {
+                // At an edge or in a gap: go to the next filled cell.
+                pos = next;
+                while !filled(pos.0, pos.1) {
+                    match step(pos) {
+                        Some(n) => pos = n,
+                        None => break,
+                    }
+                }
+            }
+        }
+        if extend {
+            let anchor = self.app.selection_start.unwrap_or((self.app.selected_row, self.app.selected_col));
+            self.app.selection_start = Some(anchor);
+            self.app.selection_end = Some(pos);
+            self.grid.scroll_target = Some(pos);
+        } else {
+            self.set_cursor(pos.0, pos.1);
+        }
+        self.grid.scroll_to_cursor = true;
+    }
+
+    /// Excel's Ctrl+End target: the last used row and column.
+    fn last_used_cell(&self) -> (usize, usize) {
+        let sheet = self.app.workbook.current_sheet();
+        sheet
+            .cells
+            .iter()
+            .filter(|(_, cd)| !cd.value.is_empty() || cd.formula.is_some())
+            .fold((0, 0), |(mr, mc), ((r, c), _)| (mr.max(*r), mc.max(*c)))
     }
 
     fn color_choices(&mut self, ui: &mut egui::Ui, background: bool) {
@@ -1022,6 +1304,11 @@ impl eframe::App for GuiApp {
         }
 
         self.handle_keys(&ctx);
+        // Excel zooms with Ctrl + mouse wheel (⌘ + scroll on Mac).
+        let zoom = ctx.input(|i| i.zoom_delta());
+        if zoom != 1.0 {
+            ctx.set_zoom_factor((ctx.zoom_factor() * zoom).clamp(0.5, 3.0));
+        }
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(&ctx, ui));
         egui::Panel::top("formula_bar").show(ui, |ui| {
@@ -1039,6 +1326,7 @@ impl eframe::App for GuiApp {
             .show(ui, |ui| self.show_grid(ui));
 
         self.show_dialogs(&ctx);
+        self.structure_dialog_ui(&ctx);
         self.confirm_dialog(&ctx);
         self.update_title(&ctx);
     }

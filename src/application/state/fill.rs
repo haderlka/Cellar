@@ -222,6 +222,45 @@ impl App {
         }
     }
 
+    /// Excel's Ctrl+Enter: put the content of cell `source` into every cell
+    /// of `range`; relative references shift per cell. One undo step.
+    pub fn fill_block_from(&mut self, source: (usize, usize), range: CellRange) -> usize {
+        let ((r0, c0), (r1, c1)) = range;
+        let sheet = self.workbook.current_sheet();
+        let evaluator = FormulaEvaluator::new(sheet);
+        let src = sheet.get_cell(source.0, source.1);
+        let mut cells = Vec::new();
+        for r in r0..=r1 {
+            for c in c0..=c1 {
+                if (r, c) == source {
+                    continue;
+                }
+                let mut cell = match &src.formula {
+                    Some(f) => {
+                        let adjusted = evaluator.adjust_formula_references(
+                            f,
+                            r as i32 - source.0 as i32,
+                            c as i32 - source.1 as i32,
+                        );
+                        if evaluator.would_create_circular_reference(&adjusted, (r, c)) {
+                            continue;
+                        }
+                        let value = crate::domain::parser::with_recalc_clock(
+                            crate::domain::parser::now_serial(),
+                            || evaluator.evaluate_formula(&adjusted),
+                        );
+                        CellData { value, formula: Some(adjusted), ..CellData::default() }
+                    }
+                    None => CellData { value: src.value.clone(), ..CellData::default() },
+                };
+                cell.format = sheet.cells.get(&(r, c)).and_then(|e| e.format.clone());
+                let empty = cell.value.is_empty() && cell.formula.is_none() && cell.format.is_none();
+                cells.push((r, c, (!empty).then_some(cell)));
+            }
+        }
+        self.apply_plan(cells)
+    }
+
     fn apply_plan(&mut self, cells: Vec<(usize, usize, Option<CellData>)>) -> usize {
         let mut batch = Vec::new();
         let mut writes = Vec::new();
@@ -347,6 +386,16 @@ mod tests {
         app.fill_down_or_right(true);
         assert_eq!(val(&app, 2, 0), "5");
         assert_eq!(formula(&app, 2, 1).as_deref(), Some("=A3+1"));
+    }
+
+    #[test]
+    fn ctrl_enter_fills_the_block_with_shifted_formulas() {
+        let mut app = app_with(&[(0, 0, "1"), (1, 0, "2"), (0, 1, "=A1*2")]);
+        app.fill_block_from((0, 1), ((0, 1), (1, 2)));
+        assert_eq!(formula(&app, 1, 1).as_deref(), Some("=A2*2"));
+        assert_eq!(formula(&app, 0, 2).as_deref(), Some("=B1*2"));
+        app.undo();
+        assert_eq!(formula(&app, 1, 1), None);
     }
 
     #[test]

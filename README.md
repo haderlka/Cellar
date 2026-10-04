@@ -124,22 +124,36 @@ output stays in the cells (the report says where) until you delete it.
 
 ### Keyboard
 
+Cellar uses Excel's shortcuts, and every menu item shows its shortcut.
+*Help → Keyboard Shortcuts & Formulas* lists them all.
+
 | Keys | Action |
 |---|---|
 | Type, F2, double-click | Edit a cell (typing replaces, F2 keeps the content) |
 | Enter / Tab (Shift = back) | Commit and move down / right |
+| Ctrl+Enter | Commit into every selected cell |
 | Esc | Cancel the edit |
 | Arrows, PgUp/PgDn, Home | Move (Shift extends the selection) |
+| Ctrl+Arrow, Ctrl+Home, Ctrl+End | Jump to the edge of the data, the first cell, the last used cell |
+| Shift+Space / Ctrl+Space / Ctrl+A | Select row / column / all |
+| Ctrl+Shift+= / Ctrl+- | Insert / delete (whole rows or columns when selected) |
 | Delete | Clear the selected cells |
 | Ctrl+C / X / V | Copy / cut / paste |
-| Ctrl+Z / Y (Ctrl+Shift+Z) | Undo / redo |
+| Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+D / Ctrl+R | Fill down / fill right |
-| Ctrl+B / U | Bold / underline |
-| Ctrl+S, Ctrl+Shift+S, Ctrl+O, Ctrl+N | Save, Save As, Open, New |
-| Ctrl+A | Select all |
-| Ctrl + / − | Zoom |
+| Ctrl+B / Ctrl+U | Bold / underline |
+| Ctrl+Shift+~ / ! / $ / % | General / number / currency / percent format |
+| Ctrl+9 / Ctrl+0 (with Shift: unhide) | Hide rows / columns |
+| Ctrl+; / Ctrl+Shift+; | Insert today's date / the current time |
+| Alt+= | AutoSum |
+| Alt+F1 | Insert chart |
+| F9 | Calculate now |
+| Shift+F11, Ctrl+PgDn / Ctrl+PgUp | Insert sheet, next / previous sheet |
+| Ctrl+S, F12, Ctrl+O, Ctrl+N | Save, Save As, Open, New |
+| Ctrl + mouse wheel | Zoom |
 
-On macOS use ⌘ instead of Ctrl.
+On macOS ⌘ replaces Ctrl for the common commands (⌘C, ⌘S, ⌘Arrow…),
+Save As is ⌘⇧S, AutoSum ⌘⇧T, and Quit ⌘Q — as in Excel for Mac.
 
 ### Batch commands
 

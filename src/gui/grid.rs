@@ -763,32 +763,19 @@ impl GuiApp {
     }
 
     fn grid_context_menu(&mut self, ui: &mut Ui) {
-        if ui.button("Cut").clicked() {
-            self.app.cut_selection();
-        }
-        if ui.button("Copy").clicked() {
-            self.app.copy_selection();
-        }
-        if ui.button("Paste").clicked() {
-            self.app.paste();
-        }
-        if ui.button("Clear contents").clicked() {
-            self.app.clear_selection_contents();
-        }
-        if ui.button("Copy as Markdown table").clicked() {
-            let (a, b) = self.selection_or_cursor();
-            let text = cellar::domain::range_to_markdown(self.app.workbook.current_sheet(), a, b);
-            ui.ctx().copy_text(text);
-            self.app.status_message = Some("Copied the selection as a Markdown table".into());
+        use crate::shortcuts::Action;
+        let ctx = ui.ctx().clone();
+        for a in [Action::Cut, Action::Copy, Action::Paste, Action::ClearContents, Action::CopyMarkdown] {
+            self.menu_item(ui, &ctx, a);
         }
         ui.separator();
-        self.row_col_buttons(ui);
-        ui.separator();
-        if ui.button("Insert chart…").clicked() {
-            self.open_chart_dialog(None);
+        for a in [Action::InsertCells, Action::DeleteCells] {
+            self.menu_item(ui, &ctx, a);
         }
-        if ui.button("PivotTable…").clicked() {
-            self.open_create_pivot();
+        self.row_col_buttons(ui, &ctx);
+        ui.separator();
+        for a in [Action::InsertChart, Action::PivotTable] {
+            self.menu_item(ui, &ctx, a);
         }
     }
 }

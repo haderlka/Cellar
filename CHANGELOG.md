@@ -30,6 +30,12 @@ history is in its repository.
 - **Canonical file layout** for `.cellar` files: sorted, one line per cell,
   default fields omitted, byte-identical on unchanged saves.
 - Logo and window icon.
+- **Excel keyboard shortcuts**, shown next to every menu item: Insert/Delete
+  (Ctrl+Shift+= / Ctrl+-, with Excel's Insert/Delete dialog), Shift+Space /
+  Ctrl+Space selection, Ctrl+Arrow jumps, Ctrl+End, Ctrl+Enter, AutoSum
+  (Alt+=), date/time (Ctrl+; / Ctrl+Shift+;), number-format shortcuts,
+  hide/unhide rows and columns, F9, F12, Shift+F11, Ctrl+PgUp/PgDn, Alt+F1.
+  Zoom moved to Ctrl + mouse wheel, as in Excel.
 
 ### Changed
 

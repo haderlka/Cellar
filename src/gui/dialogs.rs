@@ -219,53 +219,64 @@ impl GuiApp {
     }
 
     fn help_window(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Keyboard shortcuts & formulas")
+        use crate::shortcuts::Action;
+        let mac = ctx.os() == egui::os::OperatingSystem::Mac;
+        let cmd = if mac { "⌘" } else { "Ctrl+" };
+        let editing: Vec<(String, &str)> = vec![
+            ("Type".into(), "Start editing the cell (replaces its content)"),
+            ("F2 / double-click".into(), "Edit the cell's current content"),
+            ("Enter / Tab".into(), "Commit and move down / right (Shift = back)"),
+            (format!("{}Enter", cmd), "Commit into every selected cell"),
+            ("Esc".into(), "Cancel the edit"),
+            ("While typing =…".into(), "Click or drag cells to insert references"),
+            ("Fill handle".into(), "Drag the square at the selection's corner; double-click fills down"),
+        ];
+        let moving: Vec<(String, &str)> = vec![
+            ("Arrows, PgUp / PgDn".into(), "Move (Shift extends the selection)"),
+            (format!("{}Arrow", cmd), "Jump to the edge of the data (Shift extends)"),
+            ("Home".into(), "Start of the row"),
+            (format!("{}Home / {}End", cmd, cmd), "First cell / last used cell"),
+        ];
+        egui::Window::new("Keyboard Shortcuts & Formulas")
             .open(&mut self.dialogs.help)
-            .default_width(520.0)
+            .default_width(560.0)
+            .default_height(560.0)
             .show(ctx, |ui| {
-                let m = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
-                let rows = [
-                    ("Type", "start editing the cell (replaces its content)"),
-                    ("F2 / double-click", "edit the cell's current content"),
-                    ("Enter / Tab", "commit and move down / right (Shift = back)"),
-                    ("Esc", "cancel the edit"),
-                    ("While typing =…", "click or drag on cells to insert references"),
-                    ("Arrows, PgUp/PgDn", "move (Shift extends the selection)"),
-                    ("Delete", "clear the selected cells"),
-                    ("Fill handle", "drag the square at the selection's corner to fill; double-click it to fill down"),
-                ];
-                egui::Grid::new("help_keys").striped(true).num_columns(2).show(ui, |ui| {
-                    for (k, d) in rows {
-                        ui.strong(k);
-                        ui.label(d);
-                        ui.end_row();
-                    }
-                    for (k, d) in [
-                        ("C / X / V", "copy / cut / paste (formulas adjust)"),
-                        ("Z / Y", "undo / redo"),
-                        ("B / U", "bold / underline"),
-                        ("S / O / N", "save / open / new"),
-                        ("A", "select all"),
-                        ("+ / -", "zoom"),
-                    ] {
-                        ui.strong(format!("{}{}", m, k));
-                        ui.label(d);
-                        ui.end_row();
-                    }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.label(RichText::new("Cellar uses Excel's shortcuts.").weak());
+                    let section = |ui: &mut egui::Ui, title: &str, rows: &[(String, &str)]| {
+                        ui.add_space(6.0);
+                        ui.strong(title);
+                        egui::Grid::new(title).striped(true).num_columns(2).min_col_width(170.0).show(ui, |ui| {
+                            for (k, d) in rows {
+                                ui.monospace(k);
+                                ui.label(*d);
+                                ui.end_row();
+                            }
+                        });
+                    };
+                    section(ui, "Editing", &editing);
+                    section(ui, "Moving & selecting", &moving);
+                    let commands: Vec<(String, &str)> = Action::ALL
+                        .iter()
+                        .map(|a| (a.shortcut_text(ctx), a.label()))
+                        .filter(|(k, _)| !k.is_empty())
+                        .collect();
+                    section(ui, "Commands", &commands);
+                    ui.separator();
+                    ui.label(
+                        "Formulas use Excel syntax: =SUM(A1:A10), =IF(B2>0, \"yes\", \"no\"), \
+                         =VLOOKUP(…), =XLOOKUP(…), =Sheet2!A1, dynamic arrays like =SORT(A2:A9).",
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(
+                            "Workbooks are saved as .cellar: plain JSON with one line per cell, sorted, \
+                             so they diff and merge cleanly in git.",
+                        )
+                        .weak(),
+                    );
                 });
-                ui.separator();
-                ui.label(
-                    "Formulas use Excel syntax: =SUM(A1:A10), =IF(B2>0, \"yes\", \"no\"), \
-                     =VLOOKUP(…), =XLOOKUP(…), =Sheet2!A1, dynamic arrays like =SORT(A2:A9).",
-                );
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(
-                        "Workbooks are saved as .cellar: plain JSON with one line per cell, sorted, \
-                         so they diff and merge cleanly in git.",
-                    )
-                    .weak(),
-                );
             });
     }
 }

@@ -390,12 +390,86 @@ impl App {
         self.status_message = Some(format!("Deleted column {}", crate::domain::Spreadsheet::column_label(delete_at)));
     }
 
+    /// Insert `count` rows above row `at` as one undo step (Excel inserts
+    /// as many rows as are selected).
+    pub fn insert_rows(&mut self, at: usize, count: usize) {
+        let count = count.max(1);
+        self.with_snapshot_undo("insert rows", |app| {
+            for _ in 0..count {
+                app.workbook.insert_row_on_active(at);
+            }
+        });
+        self.status_message = Some(format!("Inserted {} row(s) at {}", count, at + 1));
+    }
+
+    /// Delete rows `at..at+count` as one undo step.
+    pub fn delete_rows(&mut self, at: usize, count: usize) {
+        let count = count.max(1).min(self.workbook.current_sheet().rows.saturating_sub(at));
+        self.with_snapshot_undo("delete rows", |app| {
+            for _ in 0..count {
+                app.workbook.delete_row_on_active(at);
+            }
+        });
+        let last = self.workbook.current_sheet().rows.saturating_sub(1);
+        self.selected_row = self.selected_row.min(last);
+        self.status_message = Some(format!("Deleted {} row(s) from {}", count, at + 1));
+    }
+
+    /// Insert `count` columns left of column `at` as one undo step.
+    pub fn insert_cols(&mut self, at: usize, count: usize) {
+        let count = count.max(1);
+        self.with_snapshot_undo("insert columns", |app| {
+            for _ in 0..count {
+                app.workbook.insert_col_on_active(at);
+            }
+        });
+        self.status_message = Some(format!(
+            "Inserted {} column(s) at {}",
+            count,
+            crate::domain::Spreadsheet::column_label(at)
+        ));
+    }
+
+    /// Delete columns `at..at+count` as one undo step.
+    pub fn delete_cols(&mut self, at: usize, count: usize) {
+        let count = count.max(1).min(self.workbook.current_sheet().cols.saturating_sub(at));
+        self.with_snapshot_undo("delete columns", |app| {
+            for _ in 0..count {
+                app.workbook.delete_col_on_active(at);
+            }
+        });
+        let last = self.workbook.current_sheet().cols.saturating_sub(1);
+        self.selected_col = self.selected_col.min(last);
+        self.status_message = Some(format!(
+            "Deleted {} column(s) from {}",
+            count,
+            crate::domain::Spreadsheet::column_label(at)
+        ));
+    }
+
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::CellData;
+
+    #[test]
+    fn insert_and_delete_several_rows_and_columns_undo_as_one_step() {
+        let mut app = App::default();
+        app.set_cell_with_undo(2, 2, CellData { value: "x".into(), ..CellData::default() });
+        app.insert_rows(1, 3);
+        assert_eq!(app.workbook.current_sheet().get_cell(5, 2).value, "x");
+        app.insert_cols(0, 2);
+        assert_eq!(app.workbook.current_sheet().get_cell(5, 4).value, "x");
+        app.undo();
+        app.undo();
+        assert_eq!(app.workbook.current_sheet().get_cell(2, 2).value, "x");
+        app.delete_rows(0, 2);
+        assert_eq!(app.workbook.current_sheet().get_cell(0, 2).value, "x");
+        app.delete_cols(0, 2);
+        assert_eq!(app.workbook.current_sheet().get_cell(0, 0).value, "x");
+    }
 
     #[test]
     fn test_copy_paste_single_cell() {
