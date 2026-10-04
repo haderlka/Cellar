@@ -1,0 +1,53 @@
+[package]
+name = "cellar"
+version = "0.1.0"
+edition = "2024"
+description = "A desktop spreadsheet that stores workbooks as readable, diff- and merge-friendly text. Built on the tshts calculation engine."
+license = "MIT"
+readme = "README.md"
+keywords = ["spreadsheet", "excel", "pivot-table", "gui", "plain-text"]
+categories = ["gui", "office"]
+
+[[bin]]
+name = "cellar"
+path = "src/gui/main.rs"
+
+[lib]
+name = "cellar"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+csv = "1.3"
+reqwest = { version = "0.13", features = ["blocking"] }
+arboard = "3"
+unicode-width = "0.2"
+regex = "1"
+calamine = "0.35"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Work-stealing parallel iterator. Used by `ParallelExecutor` to run
+# per-level cell evaluation across multiple cores. We use `par_iter`
+# with `with_min_len(K)` rather than per-cell tasks because the
+# ~400ns dispatch overhead exceeds typical formula-eval cost (measured
+# upstream in tshts).
+rayon = "1"
+# GUI: window, widgets, charts, native file dialogs.
+eframe = "0.36.2"
+egui_plot = "0.37.0"
+rfd = "0.17.2"
+# .xlsx parts calamine does not read (styles, charts, pivot tables).
+# Same version calamine uses, so it is only compiled once.
+quick-xml = "0.39"
+# Chart export to PNG/SVG; PNG text uses egui's bundled font.
+plotters = { version = "0.3.7", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "svg_backend", "ab_glyph", "line_series", "point_series"] }
+epaint_default_fonts = "0.36.2"
+
+[dev-dependencies]
+resvg = "0.48.1"
+tempfile = "3.0"
+
+[[bench]]
+name = "calc_engine"
+path = "benches/calc_engine.rs"
+harness = false

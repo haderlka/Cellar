@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Cellar</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8A2B4C"/>
+      <stop offset="1" stop-color="#4E1229"/>
+    </linearGradient>
+    <linearGradient id="vault" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBF3E6"/>
+      <stop offset="1" stop-color="#EBDCC4"/>
+    </linearGradient>
+    <!-- The vault: a round arch standing on the cellar floor. -->
+    <clipPath id="arch">
+      <path d="M120 420 V244 A136 136 0 0 1 392 244 V420 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- App tile -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#tile)"/>
+
+  <!-- Arch with its stone rim -->
+  <path d="M100 428 V244 A156 156 0 0 1 412 244 V428 Z" fill="#3A0C1E" opacity="0.35"/>
+  <path d="M120 420 V244 A136 136 0 0 1 392 244 V420 Z" fill="url(#vault)"/>
+
+  <!-- Keystone: the vault is masonry -->
+  <path d="M236 82 H276 L270 118 H242 Z" fill="#E7A63B" stroke="#3A0C1E" stroke-width="4" stroke-linejoin="round"/>
+
+  <!-- Grid of cells inside the vault (the wine-rack / spreadsheet) -->
+  <g clip-path="url(#arch)" stroke="#6E1F3B" stroke-width="10" stroke-linecap="square">
+    <line x1="188" y1="96" x2="188" y2="430"/>
+    <line x1="256" y1="96" x2="256" y2="430"/>
+    <line x1="324" y1="96" x2="324" y2="430"/>
+    <line x1="100" y1="232" x2="412" y2="232"/>
+    <line x1="100" y1="296" x2="412" y2="296"/>
+    <line x1="100" y1="360" x2="412" y2="360"/>
+  </g>
+
+  <!-- The active cell -->
+  <rect x="256" y="296" width="68" height="64" fill="#E7A63B"/>
+  <rect x="256" y="296" width="68" height="64" fill="none" stroke="#4E1229" stroke-width="10"/>
+  <!-- Fill handle, as in a spreadsheet selection -->
+  <rect x="314" y="350" width="22" height="22" fill="#4E1229" stroke="#FBF3E6" stroke-width="5"/>
+
+  <!-- Floor -->
+  <rect x="96" y="420" width="320" height="16" rx="6" fill="#FBF3E6" opacity="0.9"/>
+</svg>

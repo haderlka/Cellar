@@ -1,0 +1,40 @@
+//! Domain models: workbooks, sheets, cells, formats, charts and pivots.
+//!
+//! Split into focused submodules:
+//! - style — NumberFormat, TerminalColor, CellStyle, CellFormat, format_cell_value
+//! - refs — sheet-name rewriting helpers
+//! - cell — CellData
+//! - spreadsheet — Spreadsheet struct (the workhorse) plus Table and ConditionalFormat (tightly coupled types)
+//! - workbook — Workbook (multi-sheet container) + cross-sheet dependency graph
+
+mod style;
+mod refs;
+mod cell;
+mod spreadsheet;
+mod workbook;
+mod dep_graph;
+mod pivot;
+
+pub use style::{NumberFormat, TerminalColor, CellStyle, CellFormat, format_cell_value};
+pub use refs::{
+    replace_sheet_refs_with_ref_error,
+    rewrite_sheet_refs,
+    rewrite_sheet_refs_for_name_value,
+};
+pub use cell::CellData;
+pub use pivot::{
+    PivotField, PivotLayout, PivotOptions, PivotSort, PivotSpec, PivotValue, ShowValuesAs, Summarize,
+    TopFilter, BLANK_ITEM,
+};
+pub use spreadsheet::{Spreadsheet, Table, ConditionalFormat, SheetViewState, ChartSpec, ChartSeries, ChartType};
+pub use workbook::{migrate_workbook_json, Workbook};
+#[allow(unused_imports)]
+pub use workbook::WORKBOOK_SCHEMA_VERSION;
+#[allow(unused_imports)]
+pub use workbook::CrossSheetKey;
+pub use dep_graph::{NodeKey, SheetId, WorkbookGraph};
+pub use workbook::with_recalc_context;
+
+#[cfg(test)]
+mod tests {
+}

@@ -1,0 +1,705 @@
+//! Submodule of `state` — see state/mod.rs.
+//!
+//! `execute_command` is the dispatcher; longer arm bodies are extracted
+//! into sibling files (`data.rs`, etc.) as `cmd_*` helper methods.
+
+use super::*;
+
+mod analyze;
+mod data;
+
+impl App {
+    pub fn start_command_palette(&mut self) {
+        self.mode = AppMode::CommandPalette;
+        self.command_input.clear();
+        self.cursor_position = 0;
+        self.status_message = None;
+    }
+
+    pub fn execute_command(&mut self) {
+        // Commands that take filenames come first — they need
+        // case-preserved arguments. Note `:wq` / `:x` / `:wq!` / `:x!` save +
+        // quit, and `:q!` skips the dirty check.
+        let trimmed = self.command_input.trim().to_string();
+        let lower = trimmed.to_lowercase();
+        let close_palette = |s: &mut Self| {
+            s.mode = AppMode::Normal;
+            s.command_input.clear();
+            s.cursor_position = 0;
+        };
+        // Empty input: nothing to do.
+        if trimmed.is_empty() {
+            close_palette(self);
+            return;
+        }
+        // Quit / save-quit variants — exact-match on lowercased string.
+        match lower.as_str() {
+            "q" => {
+                close_palette(self);
+                self.request_quit();
+                return;
+            }
+            "q!" | "quit!" => {
+                close_palette(self);
+                self.should_quit = true;
+                return;
+            }
+            "w" => {
+                close_palette(self);
+                self.save_in_place_or_prompt();
+                return;
+            }
+            "wq" | "x" => {
+                close_palette(self);
+                self.save_in_place_or_prompt();
+                if !self.dirty {
+                    self.should_quit = true;
+                }
+                return;
+            }
+            "wq!" | "x!" => {
+                close_palette(self);
+                self.save_in_place_or_prompt();
+                self.should_quit = true;
+                return;
+            }
+            "e" | "edit" => {
+                close_palette(self);
+                self.request_load_file();
+                return;
+            }
+            _ => {}
+        }
+        // `:w <filename>` and `:e <filename>` preserve case.
+        if let Some(rest) = trimmed.strip_prefix("w ").or_else(|| trimmed.strip_prefix("W ")) {
+            let name = rest.trim().to_string();
+            if !name.is_empty() {
+                let is_xlsx = name.to_lowercase().ends_with(".xlsx");
+                // See save_in_place_or_prompt: xlsx doesn't round-trip
+                // App-only view state, so skip the snapshot for that target.
+                if !is_xlsx {
+                    self.snapshot_view_state_to_active_sheet();
+                }
+                let result = if is_xlsx {
+                    crate::infrastructure::xlsx::save_xlsx(&self.workbook, &name)
+                        .map(|_| name.clone())
+                } else {
+                    crate::infrastructure::FileRepository::save_workbook(&self.workbook, &name)
+                };
+                self.set_save_result(result);
+            } else {
+                self.status_message = Some("Usage: w <filename>".to_string());
+            }
+            close_palette(self);
+            return;
+        }
+        if let Some(rest) = trimmed.strip_prefix("e ").or_else(|| trimmed.strip_prefix("E ")) {
+            let name = rest.trim().to_string();
+            if name.is_empty() {
+                self.status_message = Some("Usage: e <filename>".to_string());
+                close_palette(self);
+                return;
+            }
+            // `:e <file>` loads the typed file directly. Going through
+            // request_load_file/start_load_file would clobber `filename_input`
+            // with the currently-open file's name (or the "spreadsheet.cellar"
+            // default), defeating the purpose. Callers that want a
+            // dirty-guard save first.
+            let mut differences = 0;
+            let result = if name.to_lowercase().ends_with(".xlsx") {
+                crate::infrastructure::xlsx_convert::convert_xlsx(&name).map(|(wb, report)| {
+                    differences = report.total_mismatches();
+                    (wb, name.clone())
+                })
+            } else {
+                crate::infrastructure::FileRepository::load_workbook(&name)
+            };
+            let loaded = result.is_ok();
+            self.set_load_workbook_result(result);
+            if loaded && differences > 0 {
+                self.status_message = Some(format!(
+                    "Imported {}: {} formula(s) compute differently than in Excel",
+                    name, differences
+                ));
+            }
+            close_palette(self);
+            return;
+        }
+        // `:export <file>` writes the current sheet to CSV.
+        if let Some(rest) = trimmed
+            .strip_prefix("export ")
+            .or_else(|| trimmed.strip_prefix("EXPORT "))
+        {
+            let name = rest.trim().to_string();
+            if name.is_empty() {
+                self.status_message = Some("Usage: export <filename>".to_string());
+            } else {
+                let result = crate::domain::CsvExporter::export_to_csv(
+                    self.workbook.current_sheet(),
+                    &name,
+                );
+                self.set_csv_export_result(result);
+            }
+            close_palette(self);
+            return;
+        }
+        // `:import <file>` replaces the current sheet from CSV. We could
+        // wire this through request_csv_import for a dirty-check prompt, but
+        // start_csv_import would then clobber the typed filename — so for
+        // now, mirror `:e <file>`'s pattern and import directly. Users who
+        // want a dirty-guard can `:w` first.
+        if let Some(rest) = trimmed
+            .strip_prefix("import ")
+            .or_else(|| trimmed.strip_prefix("IMPORT "))
+        {
+            let name = rest.trim().to_string();
+            if name.is_empty() {
+                self.status_message = Some("Usage: import <filename>".to_string());
+            } else {
+                let result = crate::domain::CsvExporter::import_from_csv(&name);
+                self.set_csv_import_result(result);
+            }
+            close_palette(self);
+            return;
+        }
+        if trimmed.starts_with("rename ") || trimmed.starts_with("RENAME ") {
+            let name = trimmed[7..].trim().to_string();
+            if !name.is_empty() {
+                if self.workbook.rename_sheet(name.clone()) {
+                    self.dirty = true;
+                    crate::infrastructure::autosave::mark_dirty();
+                    self.status_message = Some(format!("Renamed sheet to '{}'", name));
+                } else {
+                    self.status_message = Some(format!(
+                        "Rename rejected: '{}' is empty or a duplicate",
+                        name
+                    ));
+                }
+            } else {
+                self.status_message = Some("Usage: rename <name>".to_string());
+            }
+            self.mode = AppMode::Normal;
+            self.command_input.clear();
+            self.cursor_position = 0;
+            return;
+        }
+
+        let cmd = trimmed.to_lowercase();
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        match parts.as_slice() {
+            ["ir"] | ["insert", "row"] => self.insert_row(),
+            ["dr"] | ["delete", "row"] => self.delete_row(),
+            ["ic"] | ["insert", "col"] | ["insert", "column"] => self.insert_col(),
+            ["dc"] | ["delete", "col"] | ["delete", "column"] => self.delete_col(),
+            ["replace"] | ["find-replace"] | ["find", "replace"] => {
+                self.start_find_replace();
+            }
+            ["sort", "asc"] => self.sort_column_asc(),
+            ["sort", "desc"] => self.sort_column_desc(),
+            ["freeze"] => {
+                // Clamp to the active sheet's bounds so a stale cursor past
+                // the last row/col doesn't produce an unreachable frozen pane.
+                let sheet = self.workbook.current_sheet();
+                let max_r = sheet.rows.saturating_sub(1);
+                let max_c = sheet.cols.saturating_sub(1);
+                self.frozen_rows = self.selected_row.min(max_r);
+                self.frozen_cols = self.selected_col.min(max_c);
+                // Freeze is persistent view state — mark dirty so it
+                // survives :q after a freeze with no other edits.
+                self.dirty = true;
+                self.status_message = Some(format!("Frozen {} rows, {} cols", self.frozen_rows, self.frozen_cols));
+            }
+            ["unfreeze"] => {
+                self.frozen_rows = 0;
+                self.frozen_cols = 0;
+                self.dirty = true;
+                self.status_message = Some("Unfrozen all panes".to_string());
+            }
+            ["format", "general"] => self.set_selection_format(NumberFormat::General),
+            ["format", "number"] => self.set_selection_format(NumberFormat::Number { decimals: 2, thousands_sep: false }),
+            ["format", "number", d] => {
+                if let Ok(decimals) = d.parse::<u32>() {
+                    self.set_selection_format(NumberFormat::Number { decimals, thousands_sep: false });
+                } else {
+                    self.status_message = Some("Invalid decimal count".to_string());
+                }
+            }
+            ["format", "currency"] => self.set_selection_format(NumberFormat::Currency { symbol: "$".to_string(), decimals: 2 }),
+            ["format", "currency", sym] => self.set_selection_format(NumberFormat::Currency { symbol: sym.to_string(), decimals: 2 }),
+            ["format", "percent"] | ["format", "percentage"] => self.set_selection_format(NumberFormat::Percentage { decimals: 1 }),
+            ["format", "percent", d] | ["format", "percentage", d] => {
+                if let Ok(decimals) = d.parse::<u32>() {
+                    self.set_selection_format(NumberFormat::Percentage { decimals });
+                } else {
+                    self.status_message = Some("Invalid decimal count".to_string());
+                }
+            }
+            ["bold"] => self.toggle_bold(),
+            ["underline"] => self.toggle_underline(),
+            ["color", color_name] => {
+                if *color_name == "none" || *color_name == "default" {
+                    self.set_selection_fg_color(None);
+                } else if let Some(c) = TerminalColor::from_name(color_name) {
+                    self.set_selection_fg_color(Some(c));
+                } else {
+                    self.status_message = Some(format!("Unknown color: {}", color_name));
+                }
+            }
+            ["bg", color_name] => {
+                if *color_name == "none" || *color_name == "default" {
+                    self.set_selection_bg_color(None);
+                } else if let Some(c) = TerminalColor::from_name(color_name) {
+                    self.set_selection_bg_color(Some(c));
+                } else {
+                    self.status_message = Some(format!("Unknown color: {}", color_name));
+                }
+            }
+            ["sheet", "new"] | ["new", "sheet"] | ["addsheet"] => {
+                let name = format!("Sheet{}", self.workbook.sheets.len() + 1);
+                let label = format!("Add sheet '{}'", name);
+                self.with_snapshot_undo(&label, |app| {
+                    app.workbook.add_sheet(name.clone());
+                    app.workbook.active_sheet = app.workbook.sheets.len() - 1;
+                    app.selected_row = 0;
+                    app.selected_col = 0;
+                    app.scroll_row = 0;
+                    app.scroll_col = 0;
+                });
+                self.status_message = Some("Added sheet (undo with u)".to_string());
+            }
+            ["sheet", "delete"] | ["delsheet"] => {
+                let name = self.workbook.sheet_names[self.workbook.active_sheet].clone();
+                if self.workbook.sheets.len() <= 1 {
+                    self.status_message = Some("Cannot delete the last sheet".to_string());
+                } else {
+                    let label = format!("Delete sheet '{}'", name);
+                    let active = self.workbook.active_sheet;
+                    self.with_snapshot_undo(&label, |app| {
+                        app.workbook.remove_sheet(active);
+                        app.selected_row = 0;
+                        app.selected_col = 0;
+                        app.scroll_row = 0;
+                        app.scroll_col = 0;
+                        app.invalidate_cross_sheet_state();
+                    });
+                    self.status_message = Some(format!("Deleted sheet '{}' (undo with u)", name));
+                }
+            }
+            ["sheet", "next"] | ["sn"] => {
+                self.switch_next_sheet();
+            }
+            ["sheet", "prev"] | ["sp"] => {
+                self.switch_prev_sheet();
+            }
+            ["comment", ..] => {
+                // Preserve case for the comment text — the user wrote it for
+                // a human to read later. `parts` is lowercased so we recover
+                // from `trimmed`.
+                let preserved = trimmed
+                    .strip_prefix("comment ")
+                    .or_else(|| trimmed.strip_prefix("COMMENT "))
+                    .or_else(|| trimmed.strip_prefix("Comment "))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let text_lc = parts[1..].join(" ");
+                if text_lc == "clear" || text_lc == "none" {
+                    self.set_cell_comment(None);
+                } else if !preserved.is_empty() {
+                    self.set_cell_comment(Some(preserved));
+                } else {
+                    self.set_cell_comment(Some(text_lc));
+                }
+            }
+            ["filter", column_name] => {
+                if let Some(col) = Spreadsheet::parse_column_label(column_name) {
+                    self.apply_filter(col, None);
+                } else {
+                    self.status_message = Some(format!("Invalid column: {}", column_name));
+                }
+            }
+            ["filter", column_name, ..] => {
+                if let Some(col) = Spreadsheet::parse_column_label(column_name) {
+                    let criteria = parts[2..].join(" ");
+                    self.apply_filter(col, Some(criteria));
+                } else {
+                    self.status_message = Some(format!("Invalid column: {}", column_name));
+                }
+            }
+            ["unfilter"] | ["clearfilter"] | ["clear", "filter"] => {
+                self.clear_filter();
+            }
+            ["recalc"] | ["refresh"] => self.recalc_all(),
+            ["cache", "clear"] => {
+                crate::infrastructure::fetcher::clear_cache();
+                self.status_message = Some("GET cache cleared".to_string());
+            }
+            ["net", "on"] | ["network", "on"] => {
+                crate::infrastructure::fetcher::set_network_enabled(true);
+                // Clear any cached "network disabled" errors so the next
+                // recalc actually attempts the fetch.
+                crate::infrastructure::fetcher::clear_cache();
+                self.status_message = Some("Network GET enabled for this session".to_string());
+                self.recalc_all();
+            }
+            ["net", "off"] | ["network", "off"] => {
+                crate::infrastructure::fetcher::set_network_enabled(false);
+                crate::infrastructure::fetcher::clear_cache();
+                self.status_message = Some("Network GET disabled".to_string());
+            }
+            ["net", "status"] | ["network", "status"] => {
+                let on = crate::infrastructure::fetcher::network_enabled();
+                self.status_message = Some(format!(
+                    "Network GET: {}",
+                    if on { "enabled" } else { "disabled (run :net on)" }
+                ));
+            }
+            ["clipboard", "clear"] => {
+                crate::infrastructure::sidecar::clear();
+                self.clipboard = None;
+                self.status_message = Some("Clipboard cleared".to_string());
+            }
+            ["import-append", path] | ["append", path] => {
+                let path = path.to_string();
+                match crate::domain::CsvExporter::append_from_csv(
+                    self.workbook.current_sheet_mut(),
+                    &path,
+                ) {
+                    Ok(n) => {
+                        // Appended rows bypass the workbook mutation API,
+                        // so the unified graph and cross-sheet maps don't
+                        // know about them. Rebuild + dirty so the next
+                        // recalc picks up any new formulas in the import.
+                        self.workbook.rebuild_cross_sheet_deps();
+                        let name = self
+                            .workbook
+                            .sheet_names[self.workbook.active_sheet]
+                            .clone();
+                        self.workbook.mark_sheet_dirty(&name);
+                        self.dirty = true;
+                        self.status_message =
+                            Some(format!("Appended {} row(s) from {}", n, path));
+                    }
+                    Err(e) => {
+                        self.status_message = Some(format!("Append failed: {}", e));
+                    }
+                }
+            }
+            ["hide", "row"] => {
+                let hidden = self.selected_row;
+                self.hidden_rows.insert(hidden);
+                self.status_message = Some(format!("Hid row {}", hidden + 1));
+                // Move cursor off the hidden row — otherwise the formula bar
+                // keeps showing hidden content and the user can't escape.
+                let max_row = self.workbook.current_sheet().rows.saturating_sub(1);
+                let mut next = self.selected_row + 1;
+                while next <= max_row && self.hidden_rows.contains(&next) {
+                    next += 1;
+                }
+                if next <= max_row {
+                    self.selected_row = next;
+                } else {
+                    // No visible row below — try above.
+                    let mut prev = hidden;
+                    while prev > 0 && self.hidden_rows.contains(&prev) {
+                        prev -= 1;
+                    }
+                    if !self.hidden_rows.contains(&prev) {
+                        self.selected_row = prev;
+                    }
+                }
+                self.ensure_cursor_visible();
+            }
+            ["show", "rows"] | ["unhide", "rows"] => {
+                self.hidden_rows.clear();
+                self.status_message = Some("All rows shown".to_string());
+            }
+            ["hide", "col"] => {
+                let hidden = self.selected_col;
+                self.hidden_cols.insert(hidden);
+                self.status_message = Some(format!(
+                    "Hid column {}",
+                    crate::domain::Spreadsheet::column_label(hidden)
+                ));
+                // Move cursor off the hidden col — same reason as hide row.
+                let max_col = self.workbook.current_sheet().cols.saturating_sub(1);
+                let mut next = self.selected_col + 1;
+                while next <= max_col && self.hidden_cols.contains(&next) {
+                    next += 1;
+                }
+                if next <= max_col {
+                    self.selected_col = next;
+                } else {
+                    let mut prev = hidden;
+                    while prev > 0 && self.hidden_cols.contains(&prev) {
+                        prev -= 1;
+                    }
+                    if !self.hidden_cols.contains(&prev) {
+                        self.selected_col = prev;
+                    }
+                }
+                self.ensure_cursor_visible();
+            }
+            ["hide", "col", col_name] => {
+                if let Some(c) = Spreadsheet::parse_column_label(col_name) {
+                    self.hidden_cols.insert(c);
+                    self.status_message = Some(format!("Hid column {}", col_name));
+                    // If the cursor sits on the just-hidden column, advance it.
+                    if self.selected_col == c {
+                        let max_col = self.workbook.current_sheet().cols.saturating_sub(1);
+                        let mut next = c + 1;
+                        while next <= max_col && self.hidden_cols.contains(&next) {
+                            next += 1;
+                        }
+                        if next <= max_col {
+                            self.selected_col = next;
+                        } else if c > 0 {
+                            let mut prev = c - 1;
+                            while prev > 0 && self.hidden_cols.contains(&prev) {
+                                prev -= 1;
+                            }
+                            if !self.hidden_cols.contains(&prev) {
+                                self.selected_col = prev;
+                            }
+                        }
+                        self.ensure_cursor_visible();
+                    }
+                } else {
+                    self.status_message = Some(format!("Invalid column: {}", col_name));
+                }
+            }
+            ["show", "cols"] | ["unhide", "cols"] => {
+                self.hidden_cols.clear();
+                self.status_message = Some("All columns shown".to_string());
+            }
+            ["show", "all"] => {
+                self.hidden_rows.clear();
+                self.hidden_cols.clear();
+                self.status_message = Some("All rows and columns shown".to_string());
+            }
+            // `:table create A1:D10 name=Sales`
+            ["table", "create", range_str, opts @ ..] => {
+                self.cmd_table_create(range_str, opts, &trimmed)
+            }
+            ["iterative", "on"] => {
+                self.iterative_calc = true;
+                self.workbook.iterative_calc = true;
+                // Existing circular formulas need to resolve under the new
+                // mode; without this they keep showing the previous #NUM!
+                // value until the next user edit.
+                self.recalc_all();
+                self.dirty = true;
+                self.status_message = Some(format!(
+                    "Iterative calc: on (max {} iters, eps {})",
+                    self.workbook.iter_max, self.workbook.iter_epsilon,
+                ));
+            }
+            ["iterative", "off"] => {
+                self.iterative_calc = false;
+                self.workbook.iterative_calc = false;
+                self.recalc_all();
+                self.dirty = true;
+                self.status_message = Some("Iterative calc: off".to_string());
+            }
+            ["iterative", "max", n] => {
+                if let Ok(v) = n.parse::<usize>() {
+                    self.workbook.iter_max = v;
+                    if self.iterative_calc {
+                        self.recalc_all();
+                    }
+                    self.dirty = true;
+                    self.status_message = Some(format!("Iterative max = {}", v));
+                } else {
+                    self.status_message = Some("iterative max: bad number".to_string());
+                }
+            }
+            ["iterative", "epsilon", n] => {
+                if let Ok(v) = n.parse::<f64>() {
+                    self.workbook.iter_epsilon = v;
+                    if self.iterative_calc {
+                        self.recalc_all();
+                    }
+                    self.dirty = true;
+                    self.status_message = Some(format!("Iterative epsilon = {}", v));
+                } else {
+                    self.status_message = Some("iterative epsilon: bad number".to_string());
+                }
+            }
+            // `:validate A "_ > 0"` — predicate with `_` bound to the cell value.
+            ["validate", col_name, rest @ ..] if !rest.is_empty() => {
+                if let Some(col) = Spreadsheet::parse_column_label(col_name) {
+                    let predicate = rest.join(" ");
+                    self.validations.insert(col, predicate.clone());
+                    self.status_message = Some(format!("Validation set on col {}", col_name));
+                } else {
+                    self.status_message = Some(format!("Invalid column: {}", col_name));
+                }
+            }
+            ["validate", "clear"] => {
+                self.validations.clear();
+                self.status_message = Some("Validations cleared".to_string());
+            }
+            ["pivot", source, target, opts @ ..] => self.cmd_pivot(source, target, opts),
+            ["goalseek", target, expected, input] => self.cmd_goalseek(target, expected, input),
+            // `:trace` / `:trace precedents` — list cells the current
+            // formula reads. `:trace dependents` walks the unified graph.
+            ["trace"] | ["trace", "precedents"] => self.cmd_trace_precedents(),
+            ["trace", "dependents"] => self.cmd_trace_dependents(),
+            ["table", "list"] => {
+                let sheet = self.workbook.current_sheet();
+                if sheet.tables.is_empty() {
+                    self.status_message = Some("(no tables on this sheet)".to_string());
+                } else {
+                    let names: Vec<String> = sheet
+                        .tables
+                        .iter()
+                        .map(|t| format!("{}({}x{})", t.name, t.bottom_row - t.top_row + 1, t.headers.len()))
+                        .collect();
+                    self.status_message = Some(names.join(", "));
+                }
+            }
+            ["cf", "clear"] => {
+                let sheet_idx = self.workbook.active_sheet;
+                let old = self.workbook.current_sheet().conditional_formats.clone();
+                let n = old.len();
+                if n > 0 {
+                    self.workbook.current_sheet_mut().conditional_formats.clear();
+                    self.workbook.current_sheet_mut().cf_cache.lock().unwrap().clear();
+                    self.record_action(UndoAction::ConditionalFormatsReplaced {
+                        sheet_idx,
+                        old,
+                        new: Vec::new(),
+                    });
+                }
+                self.status_message = Some(format!("Cleared {} conditional format rule(s)", n));
+            }
+            ["cf", "list"] => {
+                let rules = &self.workbook.current_sheet().conditional_formats;
+                if rules.is_empty() {
+                    self.status_message = Some("(no conditional formats)".to_string());
+                } else {
+                    let entries: Vec<String> = rules.iter().enumerate().map(|(i, r)| {
+                        format!("#{} col {} when {}", i, crate::domain::Spreadsheet::column_label(r.column), r.predicate)
+                    }).collect();
+                    self.status_message = Some(entries.join("  |  "));
+                }
+            }
+            // `:cf <col> <predicate> [bg=COLOR] [fg=COLOR] [bold] [underline]`
+            ["cf", col_name, rest @ ..] if !rest.is_empty() => self.cmd_cf_set(col_name, rest),
+            ["name", name, rest @ ..] if !rest.is_empty() => {
+                // Join the remaining tokens so values with spaces (e.g.
+                // `LAMBDA(x, x*2)`) survive intact.
+                let value = rest.join(" ");
+                let label = format!("Name '{}' = {}", name, value);
+                let name_owned = (*name).to_string();
+                let value_owned = value.clone();
+                self.with_snapshot_undo(&label, |app| {
+                    app.workbook.set_name(&name_owned, &value_owned);
+                });
+                self.status_message = Some(format!("Named '{}' = {}", name, value));
+            }
+            ["unname", name] => {
+                if !self.workbook.named_ranges.contains_key(*name)
+                    && !self.workbook.named_ranges.keys().any(|k| k.eq_ignore_ascii_case(name))
+                {
+                    self.status_message = Some(format!("No such name: {}", name));
+                } else {
+                    let label = format!("Remove name '{}'", name);
+                    let name_owned = (*name).to_string();
+                    self.with_snapshot_undo(&label, |app| {
+                        app.workbook.remove_name(&name_owned);
+                    });
+                    self.status_message = Some(format!("Removed name '{}'", name));
+                }
+            }
+            ["names"] => {
+                if self.workbook.named_ranges.is_empty() {
+                    self.status_message = Some("(no named ranges)".to_string());
+                } else {
+                    let mut entries: Vec<String> = self
+                        .workbook
+                        .named_ranges
+                        .iter()
+                        .map(|(k, v)| format!("{}={}", k, v))
+                        .collect();
+                    entries.sort();
+                    self.status_message = Some(entries.join("  "));
+                }
+            }
+            ["autosave", "on"] => {
+                crate::infrastructure::autosave::enable();
+                self.status_message =
+                    Some("Auto-save enabled (30s idle, writes to current filename)".to_string());
+            }
+            ["autosave", "off"] => {
+                crate::infrastructure::autosave::disable();
+                self.status_message = Some("Auto-save disabled".to_string());
+            }
+            ["regex", "on"] => {
+                self.search_regex = true;
+                self.status_message = Some("Regex search: on".to_string());
+            }
+            ["regex", "off"] => {
+                self.search_regex = false;
+                self.status_message = Some("Regex search: off".to_string());
+            }
+            ["case", "on"] | ["case-sensitive", "on"] => {
+                self.search_case_sensitive = true;
+                self.status_message = Some("Case-sensitive search: on".to_string());
+            }
+            ["case", "off"] | ["case-sensitive", "off"] => {
+                self.search_case_sensitive = false;
+                self.status_message = Some("Case-sensitive search: off".to_string());
+            }
+            _ => {
+                self.status_message = Some(format!("Unknown command: {}", self.command_input));
+            }
+        }
+        self.mode = AppMode::Normal;
+        self.command_input.clear();
+        self.cursor_position = 0;
+    }
+
+    pub fn command_suggestions(&self, max: usize) -> Vec<&'static str> {
+        const ALL: &[&str] = &[
+            "q", "q!", "w", "wq", "x", "e ",
+            "export ", "import ", "import-append ",
+            "ir", "dr", "ic", "dc",
+            "insert row", "delete row", "insert col", "delete col",
+            "sort asc", "sort desc",
+            "freeze", "unfreeze",
+            "format general", "format number", "format currency", "format percent",
+            "bold", "underline",
+            "color red", "color green", "color blue", "color yellow", "color none",
+            "bg red", "bg green", "bg blue", "bg yellow", "bg none",
+            "sheet new", "sheet delete", "sheet next", "sheet prev",
+            "rename ",
+            "comment ",
+            "filter ", "unfilter",
+            "hide row", "show rows",
+            "recalc", "cache clear",
+            "regex on", "regex off",
+            "case on", "case off",
+            "autosave on", "autosave off",
+            "import-append ",
+            "name ", "unname ", "names",
+            "cf ", "cf clear", "cf list",
+            "table create ", "table list",
+            "pivot ", "goalseek ",
+            "trace", "trace dependents",
+        ];
+        let q = self.command_input.trim().to_lowercase();
+        if q.is_empty() {
+            return ALL.iter().take(max).copied().collect();
+        }
+        ALL.iter()
+            .filter(|c| c.starts_with(&q))
+            .take(max)
+            .copied()
+            .collect()
+    }
+
+}
+
+#[cfg(test)]
+mod tests;

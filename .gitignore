@@ -1,0 +1,4 @@
+/target
+# Scratch workbooks from local testing — keep test fixtures elsewhere.
+/*.cellar
+/*.xlsx
