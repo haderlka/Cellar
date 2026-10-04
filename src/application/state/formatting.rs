@@ -131,8 +131,22 @@ impl App {
         let range = self
             .get_selection_range()
             .unwrap_or(((self.selected_row, self.selected_col), (self.selected_row, self.selected_col)));
-        let ((sr, sc), (er, ec)) = range;
-        let mut out = Vec::with_capacity((er - sr + 1) * (ec - sc + 1));
+        let ((sr, sc), (mut er, mut ec)) = range;
+        // Formats are stored per cell, so Select All on a large sheet
+        // would write up to a billion cells. Past a million, format only
+        // the part of the selection that holds data.
+        const MAX_FORMAT_CELLS: usize = 1_000_000;
+        if (er - sr + 1).saturating_mul(ec - sc + 1) > MAX_FORMAT_CELLS {
+            let (last_r, last_c) = self
+                .workbook
+                .current_sheet()
+                .cells
+                .keys()
+                .fold((sr, sc), |(mr, mc), &(r, c)| (mr.max(r), mc.max(c)));
+            er = er.min(last_r);
+            ec = ec.min(last_c);
+        }
+        let mut out = Vec::with_capacity((er - sr + 1).saturating_mul(ec - sc + 1).min(MAX_FORMAT_CELLS));
         for r in sr..=er {
             for c in sc..=ec {
                 out.push((r, c));

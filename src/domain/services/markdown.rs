@@ -30,6 +30,14 @@ fn escape(v: &str) -> String {
 /// A Markdown table of the rectangle (r0, c0)–(r1, c1); the first row is the
 /// header.
 pub fn range_to_markdown(sheet: &Spreadsheet, (r0, c0): (usize, usize), (r1, c1): (usize, usize)) -> String {
+    // Stop at the last row/column holding a value: trailing blanks add
+    // nothing to a table, and Select All on a large sheet would otherwise
+    // build a billion cells.
+    let (r1, c1) = sheet
+        .cells
+        .iter()
+        .filter(|&(&(r, c), cd)| (r0..=r1).contains(&r) && (c0..=c1).contains(&c) && !cd.value.trim().is_empty())
+        .fold((r0, c0), |(mr, mc), (&(r, c), _)| (mr.max(r), mc.max(c)));
     let rows: Vec<Vec<String>> = (r0..=r1)
         .map(|r| (c0..=c1).map(|c| escape(&sheet.get_cell(r, c).value)).collect())
         .collect();

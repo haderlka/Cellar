@@ -11,6 +11,7 @@ use cellar::domain::{numbers, range_chart_data, ChartData, ChartSeries, ChartSpe
 use cellar::infrastructure::chart_image;
 
 use crate::app::GuiApp;
+use crate::sidebar::SidebarDelete;
 
 /// Tableau 10 — distinguishable in light and dark themes.
 const SERIES_COLORS: [Color32; 8] = [
@@ -30,8 +31,11 @@ fn series_color(i: usize) -> Color32 {
 
 /// State of the insert/edit chart window.
 pub struct ChartDialog {
-    /// `Some(i)` when editing chart `i` of the active sheet.
-    pub index: Option<usize>,
+    /// When editing: the host sheet and the chart as it was when the dialog
+    /// opened. Saving looks the chart up again, because the sidebar stays
+    /// usable while the window is open (charts can be deleted, undone, or
+    /// the sheet switched), so an index would go stale.
+    pub editing: Option<(usize, ChartSpec)>,
     pub spec: ChartSpec,
     pub categories: String,
 }
@@ -231,13 +235,17 @@ fn chart_from_selection(gui: &GuiApp) -> ChartSpec {
 
 impl GuiApp {
     pub fn open_chart_dialog(&mut self, index: Option<usize>) {
-        let spec = match index {
-            Some(i) => self.app.workbook.current_sheet().charts[i].clone(),
-            None => chart_from_selection(self),
+        let host = self.app.workbook.active_sheet;
+        let (spec, editing) = match index {
+            Some(i) => {
+                let Some(spec) = self.app.workbook.current_sheet().charts.get(i).cloned() else { return };
+                (spec.clone(), Some((host, spec)))
+            }
+            None => (chart_from_selection(self), None),
         };
         self.show_sidebar = true;
         self.dialogs.chart = Some(ChartDialog {
-            index,
+            editing,
             categories: spec.categories.clone().unwrap_or_default(),
             spec,
         });
@@ -251,7 +259,7 @@ impl GuiApp {
         };
         self.show_sidebar = true;
         self.dialogs.chart = Some(ChartDialog {
-            index: None,
+            editing: None,
             categories: String::new(),
             spec: ChartSpec {
                 title,
@@ -371,7 +379,9 @@ impl GuiApp {
             self.open_chart_dialog(Some(i));
         }
         if delete {
-            self.app.remove_chart(i);
+            // Applied after the sidebar is drawn: callers iterate chart
+            // indices, which a removal mid-frame would shift.
+            self.sidebar_delete = Some(SidebarDelete::Chart(i));
         }
     }
 
@@ -395,7 +405,7 @@ impl GuiApp {
             self.chart_data(&preview)
         };
 
-        let title = match (dlg.index.is_some(), is_pivot) {
+        let title = match (dlg.editing.is_some(), is_pivot) {
             (true, _) => "Edit chart",
             (false, true) => "Insert PivotChart",
             (false, false) => "Insert chart",
@@ -479,7 +489,7 @@ impl GuiApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     let ok = preview_data.is_ok();
-                    if ui.add_enabled(ok, egui::Button::new(if dlg.index.is_some() { "Save" } else { "Insert" })).clicked() {
+                    if ui.add_enabled(ok, egui::Button::new(if dlg.editing.is_some() { "Save" } else { "Insert" })).clicked() {
                         apply = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -493,8 +503,19 @@ impl GuiApp {
                 spec.categories = preview.categories;
                 spec.series = preview.series;
             }
-            match dlg.index {
-                Some(i) => self.app.replace_chart(i, spec),
+            match dlg.editing {
+                Some((sheet, original)) => {
+                    let index = (self.app.workbook.active_sheet == sheet)
+                        .then(|| self.app.workbook.current_sheet().charts.iter().position(|c| *c == original))
+                        .flatten();
+                    match index {
+                        Some(i) => self.app.replace_chart(i, spec),
+                        None => {
+                            self.app.status_message =
+                                Some(format!("Chart \"{}\" was removed or changed meanwhile; not saved", original.title));
+                        }
+                    }
+                }
                 None => self.app.add_chart(spec),
             }
         } else if !(cancel || !open) {

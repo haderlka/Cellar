@@ -66,8 +66,10 @@ pub struct PivotEntry {
 
 #[derive(Default)]
 pub struct PivotUi {
-    /// Pivot (index on the active sheet) whose field pane is open.
-    pub editing: Option<usize>,
+    /// Pivot whose field pane is open, as (host sheet, pivot name). Not an
+    /// index: deletes, undo and sheet switches would make one point at a
+    /// different pivot. Resolve with `GuiApp::editing_pivot`.
+    pub editing: Option<(usize, String)>,
     search: String,
     pub create: Option<CreateDialog>,
     value_settings: Option<ValueSettingsDialog>,
@@ -198,6 +200,23 @@ fn remove_field_everywhere(spec: &mut PivotSpec, field: &str) {
 // ----------------------------------------------------------------- impl
 
 impl GuiApp {
+    /// Index of the pivot whose field pane is open, if it is on the active
+    /// sheet and still exists.
+    pub fn editing_pivot(&self) -> Option<usize> {
+        let (sheet, name) = self.pivots.editing.as_ref()?;
+        if *sheet != self.app.workbook.active_sheet {
+            return None;
+        }
+        self.app.workbook.current_sheet().pivots.iter().position(|p| &p.name == name)
+    }
+
+    /// Open the field pane for pivot `idx` of the active sheet.
+    pub fn set_editing_pivot(&mut self, idx: usize) {
+        let host = self.app.workbook.active_sheet;
+        self.pivots.editing =
+            self.app.workbook.current_sheet().pivots.get(idx).map(|p| (host, p.name.clone()));
+    }
+
     /// Cached result of pivot `idx` on the active sheet; recomputed when the
     /// definition or the source data change.
     pub fn pivot_entry(&mut self, idx: usize) -> Option<Rc<PivotEntry>> {
@@ -331,7 +350,8 @@ impl GuiApp {
                     let spec = PivotSpec::new(name, dlg.source.trim().to_uppercase());
                     self.pivots.create = None;
                     self.app.add_pivot(spec);
-                    self.pivots.editing = Some(self.app.workbook.current_sheet().pivots.len() - 1);
+                    let last = self.app.workbook.current_sheet().pivots.len() - 1;
+                    self.set_editing_pivot(last);
                 }
             }
         }
@@ -652,7 +672,7 @@ impl GuiApp {
                     .sense(Sense::click()),
                 );
                 if r.clicked() {
-                    self.pivots.editing = Some(idx);
+                    self.set_editing_pivot(idx);
                 }
             }
             Ok(out) => {
@@ -990,7 +1010,12 @@ impl GuiApp {
                 let mut spec = dlg.draft;
                 spec.name = name;
                 spec.source = spec.source.trim().to_uppercase();
+                // Keep the field pane open across a rename.
+                let was_editing = self.editing_pivot() == Some(dlg.pivot);
                 self.app.replace_pivot(dlg.pivot, spec);
+                if was_editing {
+                    self.set_editing_pivot(dlg.pivot);
+                }
             }
         } else if cancel {
             self.pivots.options = None;

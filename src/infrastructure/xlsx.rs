@@ -297,9 +297,9 @@ fn build_styles_xml(styles: &[CellFormat]) -> String {
             NumberFormat::General => 0u32, // built-in "General"
             NumberFormat::Number { decimals, thousands_sep } => {
                 let code = if *thousands_sep {
-                    format!("#,##0.{}", "0".repeat(*decimals as usize))
+                    format!("#,##0.{}", "0".repeat((*decimals).min(crate::domain::MAX_DECIMALS) as usize))
                 } else {
-                    format!("0.{}", "0".repeat(*decimals as usize))
+                    format!("0.{}", "0".repeat((*decimals).min(crate::domain::MAX_DECIMALS) as usize))
                 };
                 // Strip trailing dot if decimals == 0
                 let code = if code.ends_with('.') { code.trim_end_matches('.').to_string() } else { code };
@@ -311,7 +311,7 @@ fn build_styles_xml(styles: &[CellFormat]) -> String {
                 }
             }
             NumberFormat::Currency { symbol, decimals } => {
-                let code = format!("\"{}\"#,##0.{}", symbol, "0".repeat(*decimals as usize));
+                let code = format!("\"{}\"#,##0.{}", symbol, "0".repeat((*decimals).min(crate::domain::MAX_DECIMALS) as usize));
                 let code = if code.ends_with('.') { code.trim_end_matches('.').to_string() } else { code };
                 if let Some(i) = numfmts.iter().position(|n| n == &code) {
                     164 + i as u32
@@ -324,7 +324,7 @@ fn build_styles_xml(styles: &[CellFormat]) -> String {
                 let code = if *decimals == 0 {
                     "0%".to_string()
                 } else {
-                    format!("0.{}%", "0".repeat(*decimals as usize))
+                    format!("0.{}%", "0".repeat((*decimals).min(crate::domain::MAX_DECIMALS) as usize))
                 };
                 if let Some(i) = numfmts.iter().position(|n| n == &code) {
                     164 + i as u32

@@ -82,10 +82,12 @@ pub struct App {
     pub status_message: Option<String>,
     /// Input buffer for filename entry
     pub filename_input: String,
-    /// Undo stack for tracking changes
-    pub undo_stack: VecDeque<UndoAction>,
+    /// Undo stack for tracking changes, with the sheet that was active
+    /// when each change was made (cell-level actions address the active
+    /// sheet, so undo/redo switch back to it first).
+    pub undo_stack: VecDeque<(usize, UndoAction)>,
     /// Redo stack for tracking undone changes
-    pub redo_stack: VecDeque<UndoAction>,
+    pub redo_stack: VecDeque<(usize, UndoAction)>,
     /// Search query input buffer
     pub search_query: String,
     /// Search results as (row, col) coordinates, in row-major order so
@@ -303,7 +305,7 @@ impl App {
 
     fn record_action(&mut self, action: UndoAction) {
         const MAX_UNDO_STACK_SIZE: usize = 1000;
-        self.undo_stack.push_back(action);
+        self.undo_stack.push_back((self.workbook.active_sheet, action));
         if self.undo_stack.len() > MAX_UNDO_STACK_SIZE {
             self.undo_stack.pop_front();
         }
@@ -334,8 +336,22 @@ impl App {
         });
     }
 
+    /// Cell-level undo entries (`CellModified`, `Batch`) carry no sheet and
+    /// apply to the active sheet, so show the sheet they were made on first,
+    /// as Excel does. Entries are undone in order, so the recorded index
+    /// still names the same sheet (sheet add/delete are snapshots).
+    fn switch_to_undo_sheet(&mut self, sheet: usize, action: &UndoAction) {
+        let cell_level = matches!(action, UndoAction::CellModified { .. } | UndoAction::Batch(_));
+        if cell_level && sheet != self.workbook.active_sheet && sheet < self.workbook.sheets.len() {
+            self.snapshot_view_state_to_active_sheet();
+            self.switch_to_sheet(sheet);
+            self.restore_view_state_from_active_sheet();
+        }
+    }
+
     pub fn undo(&mut self) {
-        if let Some(action) = self.undo_stack.pop_back() {
+        if let Some((sheet, action)) = self.undo_stack.pop_back() {
+            self.switch_to_undo_sheet(sheet, &action);
             let label = action.description();
             match action.revert(&mut self.workbook) {
                 Ok(()) => {
@@ -345,7 +361,7 @@ impl App {
                     self.status_message = Some(format!("Undo {}: {}", label, e));
                 }
             }
-            self.redo_stack.push_back(action);
+            self.redo_stack.push_back((sheet, action));
             self.dirty = true;
         }
     }
@@ -365,7 +381,8 @@ impl App {
     }
 
     pub fn redo(&mut self) {
-        if let Some(action) = self.redo_stack.pop_back() {
+        if let Some((sheet, action)) = self.redo_stack.pop_back() {
+            self.switch_to_undo_sheet(sheet, &action);
             let label = action.description();
             match action.apply(&mut self.workbook) {
                 Ok(()) => {
@@ -375,7 +392,7 @@ impl App {
                     self.status_message = Some(format!("Redo {}: {}", label, e));
                 }
             }
-            self.undo_stack.push_back(action);
+            self.undo_stack.push_back((sheet, action));
             self.dirty = true;
         }
     }
@@ -622,14 +639,21 @@ impl App {
         let ((start_row, start_col), (end_row, end_col)) = (start, end);
         let mut sum = 0.0;
         let mut count = 0usize;
-        for row in start_row..=end_row {
-            for col in start_col..=end_col {
-                let cell = self.workbook.current_sheet().get_cell(row, col);
-                if let Ok(n) = cell.value.parse::<f64>() {
-                    sum += n;
-                    count += 1;
-                }
-            }
+        // Walk the stored cells, not the rectangle: a whole-column or
+        // Select All selection on a large sheet is millions of empty cells.
+        // Summed in row-major order so the result doesn't depend on hash order.
+        let mut numbers: Vec<((usize, usize), f64)> = self
+            .workbook
+            .current_sheet()
+            .cells
+            .iter()
+            .filter(|&(&(row, col), _)| (start_row..=end_row).contains(&row) && (start_col..=end_col).contains(&col))
+            .filter_map(|(&pos, cell)| cell.value.parse::<f64>().ok().map(|n| (pos, n)))
+            .collect();
+        numbers.sort_unstable_by_key(|&(pos, _)| pos);
+        for (_, n) in numbers {
+            sum += n;
+            count += 1;
         }
         let result = if count > 0 {
             Some((sum, sum / count as f64, count))

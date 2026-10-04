@@ -53,6 +53,8 @@ pub struct GuiApp {
     pub dialogs: Dialogs,
     pub pivots: crate::pivot_ui::PivotUi,
     pub show_sidebar: bool,
+    /// A Delete clicked on a sidebar card, applied once the sidebar is drawn.
+    pub sidebar_delete: Option<crate::sidebar::SidebarDelete>,
     /// Suggested path for the first "Save" after importing a non-.cellar
     /// file (xlsx/csv): same folder, same name, `.cellar` extension.
     pub suggested_save: Option<PathBuf>,
@@ -77,6 +79,7 @@ impl GuiApp {
             dialogs: Dialogs::default(),
             pivots: Default::default(),
             show_sidebar: true,
+            sidebar_delete: None,
             suggested_save: None,
             name_box: String::new(),
             name_box_editing: false,
@@ -415,9 +418,12 @@ impl GuiApp {
     /// Sheets have a fixed size in Cellar; grow it when the user walks past
     /// the edge so the grid feels unbounded.
     pub(crate) fn grow_to(&mut self, row: usize, col: usize) {
+        // Excel's row limit: the Name Box accepts any row number, and the
+        // grid, Select All and copy all scale with the sheet's size.
+        const MAX_ROWS: usize = Spreadsheet::MAX_ROWS;
         let sheet = self.app.workbook.current_sheet_mut();
-        if row + 1 >= sheet.rows {
-            sheet.rows = row + 50;
+        if row + 1 >= sheet.rows && sheet.rows < MAX_ROWS {
+            sheet.rows = (row + 50).min(MAX_ROWS);
         }
         if col + 1 >= sheet.cols && col < 1024 {
             sheet.cols = (col + 5).min(1024);

@@ -81,6 +81,14 @@ impl ConversionReport {
 
 /// Read an `.xlsx` file into a fully formatted, recalculated workbook.
 pub fn convert_xlsx(path: &str) -> Result<(Workbook, ConversionReport), String> {
+    // The readers (calamine and our XML parsing) see untrusted input; some
+    // malformed files make calamine panic (e.g. overflowing cell
+    // references). Report those as a damaged file instead of crashing.
+    std::panic::catch_unwind(|| convert_xlsx_unguarded(path))
+        .unwrap_or_else(|_| Err(format!("{} could not be read; the file may be damaged", path)))
+}
+
+fn convert_xlsx_unguarded(path: &str) -> Result<(Workbook, ConversionReport), String> {
     let mut wb = super::xlsx::load_xlsx(path)?;
     let mut report = ConversionReport { source: path.to_string(), ..Default::default() };
 

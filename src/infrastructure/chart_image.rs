@@ -11,7 +11,7 @@ use plotters::coord::Shift;
 use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
-use crate::domain::{resolve_chart_data, ChartData, ChartSpec, ChartType, Workbook};
+use crate::domain::{plottable, resolve_chart_data, ChartData, ChartSpec, ChartType, Workbook};
 
 /// Default image size in pixels.
 pub const DEFAULT_SIZE: (u32, u32) = (1200, 700);
@@ -50,6 +50,12 @@ fn err<E: std::fmt::Debug>(e: E) -> String {
 /// Write `data` drawn as `spec` to `path`. The format follows the file
 /// extension: `.svg` → SVG, anything else → PNG.
 pub fn export_chart(spec: &ChartSpec, data: &ChartData, path: &Path, size: (u32, u32)) -> Result<(), String> {
+    // Same clamping as the GUI's data, for callers that built `data`
+    // themselves: plotters loops forever on an axis span that overflows.
+    let data = &ChartData {
+        categories: data.categories.clone(),
+        series: data.series.iter().map(|(n, v)| (n.clone(), v.iter().map(|x| plottable(*x)).collect())).collect(),
+    };
     if data.series.iter().all(|(_, v)| v.iter().all(Option::is_none)) {
         return Err(format!("\"{}\" has no numeric data", spec.title));
     }
@@ -170,7 +176,7 @@ fn legend<'a, DB: DrawingBackend + 'a, CT: plotters::coord::CoordTranslate>(
 fn draw_scatter<DB: DrawingBackend>(area: &DrawingArea<DB, Shift>, data: &ChartData) -> Result<(), String> {
     // X from the category range when it's numeric, else the point index.
     let xs: Vec<f64> = (0..data.series.iter().map(|(_, v)| v.len()).max().unwrap_or(0))
-        .map(|i| data.categories.get(i).and_then(|c| c.trim().parse().ok()).unwrap_or(i as f64))
+        .map(|i| plottable(data.categories.get(i).and_then(|c| c.trim().parse().ok())).unwrap_or(i as f64))
         .collect();
     let (xlo, xhi) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), x| (l.min(*x), h.max(*x)));
     let (xlo, xhi) = if xlo.is_finite() && xhi > xlo { (xlo, xhi) } else { (0.0, 1.0) };

@@ -85,16 +85,19 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
             Ok(Value::Number((h * 3600.0 + m * 60.0 + s) / 86400.0))
         });
         reg.register_function("HOUR", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             let frac = args[0].to_number().fract();
             let secs = (frac * 86400.0).round() as i64;
             Ok(Value::Number(((secs / 3600) % 24) as f64))
         });
         reg.register_function("MINUTE", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             let frac = args[0].to_number().fract();
             let secs = (frac * 86400.0).round() as i64;
             Ok(Value::Number(((secs / 60) % 60) as f64))
         });
         reg.register_function("SECOND", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             let frac = args[0].to_number().fract();
             let secs = (frac * 86400.0).round() as i64;
             Ok(Value::Number((secs % 60) as f64))

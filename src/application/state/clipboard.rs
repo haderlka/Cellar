@@ -3,6 +3,67 @@
 use super::*;
 
 impl App {
+    /// Stored cells inside `range`, row-major. Sheets are sparse; walking
+    /// the rectangle instead would be a billion lookups for Select All on
+    /// a large sheet.
+    fn stored_cells_in(&self, ((r0, c0), (r1, c1)): ((usize, usize), (usize, usize))) -> Vec<(usize, usize)> {
+        let mut keys: Vec<(usize, usize)> = self
+            .workbook
+            .current_sheet()
+            .cells
+            .keys()
+            .filter(|&&(r, c)| (r0..=r1).contains(&r) && (c0..=c1).contains(&c))
+            .copied()
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The selection's copyable cells (relative positions) and its text as
+    /// TSV, which stops at the last row/column holding a value.
+    fn collect_for_clipboard(
+        &self,
+        range: ((usize, usize), (usize, usize)),
+    ) -> (Vec<(usize, usize, CellData)>, String) {
+        let ((start_row, start_col), _) = range;
+        let sheet = self.workbook.current_sheet();
+        let mut cells = Vec::new();
+        let (mut last_row, mut last_col) = (start_row, start_col);
+        for (row, col) in self.stored_cells_in(range) {
+            let cell = sheet.get_cell(row, col);
+            if !cell.value.is_empty() {
+                last_row = last_row.max(row);
+                last_col = last_col.max(col);
+            }
+            // Skip spill ghosts: their value is derived from an anchor
+            // formula and they have no formula of their own, so pasting
+            // them as-is would produce inert duplicates of the anchor's
+            // top-left value. The anchor (when included in the range)
+            // carries the formula and will re-spill at the destination.
+            if cell.spill_anchor.is_some() {
+                continue;
+            }
+            if !cell.value.is_empty() || cell.formula.is_some() {
+                cells.push((row - start_row, col - start_col, cell));
+            }
+        }
+
+        // Sentinel-prefixed TSV for system clipboard.
+        let mut tsv = String::from(crate::infrastructure::sidecar::SENTINEL);
+        for row in start_row..=last_row {
+            for col in start_col..=last_col {
+                if col > start_col {
+                    tsv.push('\t');
+                }
+                if let Some(cell) = sheet.cells.get(&(row, col)) {
+                    tsv.push_str(&cell.value);
+                }
+            }
+            tsv.push('\n');
+        }
+        (cells, tsv)
+    }
+
     pub fn copy_selection(&mut self) {
         let range = if let Some(range) = self.get_selection_range() {
             range
@@ -10,37 +71,8 @@ impl App {
             ((self.selected_row, self.selected_col), (self.selected_row, self.selected_col))
         };
         let ((start_row, start_col), (end_row, end_col)) = range;
-        let mut cells = Vec::new();
-        for row in start_row..=end_row {
-            for col in start_col..=end_col {
-                let cell = self.workbook.current_sheet().get_cell(row, col);
-                // Skip spill ghosts: their value is derived from an anchor
-                // formula and they have no formula of their own, so pasting
-                // them as-is would produce inert duplicates of the anchor's
-                // top-left value. The anchor (when included in the range)
-                // carries the formula and will re-spill at the destination.
-                if cell.spill_anchor.is_some() {
-                    continue;
-                }
-                if !cell.value.is_empty() || cell.formula.is_some() {
-                    cells.push((row - start_row, col - start_col, cell));
-                }
-            }
-        }
+        let (cells, tsv) = self.collect_for_clipboard(range);
         let count = (end_row - start_row + 1) * (end_col - start_col + 1);
-
-        // Sentinel-prefixed TSV for system clipboard.
-        let mut tsv = String::from(crate::infrastructure::sidecar::SENTINEL);
-        for row in start_row..=end_row {
-            for col in start_col..=end_col {
-                if col > start_col {
-                    tsv.push('\t');
-                }
-                let cell = self.workbook.current_sheet().get_cell(row, col);
-                tsv.push_str(&cell.value);
-            }
-            tsv.push('\n');
-        }
         if let Ok(mut board) = arboard::Clipboard::new() {
             let _ = board.set_text(tsv);
         }
@@ -64,35 +96,13 @@ impl App {
         } else {
             ((self.selected_row, self.selected_col), (self.selected_row, self.selected_col))
         };
-        let ((start_row, start_col), (end_row, end_col)) = range;
-        let mut cells = Vec::new();
-        for row in start_row..=end_row {
-            for col in start_col..=end_col {
-                let cell = self.workbook.current_sheet().get_cell(row, col);
-                if cell.spill_anchor.is_some() {
-                    continue;
-                }
-                if !cell.value.is_empty() || cell.formula.is_some() {
-                    cells.push((row - start_row, col - start_col, cell));
-                }
-            }
-        }
+        let ((start_row, start_col), _) = range;
+        let (cells, tsv) = self.collect_for_clipboard(range);
         let count = cells.len();
 
         // Symmetric with copy_selection: also push the cut region to the
         // system clipboard so an external paste after `dd`/`x` gets the
         // cut contents instead of stale data from the previous copy.
-        let mut tsv = String::from(crate::infrastructure::sidecar::SENTINEL);
-        for row in start_row..=end_row {
-            for col in start_col..=end_col {
-                if col > start_col {
-                    tsv.push('\t');
-                }
-                let cell = self.workbook.current_sheet().get_cell(row, col);
-                tsv.push_str(&cell.value);
-            }
-            tsv.push('\n');
-        }
         if let Ok(mut board) = arboard::Clipboard::new() {
             let _ = board.set_text(tsv);
         }
@@ -121,26 +131,20 @@ impl App {
     }
 
     fn clear_range_with_undo(&mut self, range: ((usize, usize), (usize, usize))) {
-        let ((start_row, start_col), (end_row, end_col)) = range;
         // Clear the cells and notify cross-sheet listeners so any
         // formula on another sheet that referenced these now goes stale.
         // Route the clears through `clear_cells_on_active` so the dirty
         // set is populated (single workbook call, one cross-sheet pass).
-        let mut batch = Vec::new();
-        let mut positions: Vec<(usize, usize)> = Vec::new();
-        for row in start_row..=end_row {
-            for col in start_col..=end_col {
-                let old = if self.workbook.current_sheet().cells.contains_key(&(row, col)) {
-                    Some(self.workbook.current_sheet().get_cell(row, col))
-                } else {
-                    None
-                };
-                if old.is_some() {
-                    batch.push(UndoAction::CellModified { row, col, old_cell: old, new_cell: None });
-                    positions.push((row, col));
-                }
-            }
-        }
+        let positions = self.stored_cells_in(range);
+        let batch: Vec<UndoAction> = positions
+            .iter()
+            .map(|&(row, col)| UndoAction::CellModified {
+                row,
+                col,
+                old_cell: Some(self.workbook.current_sheet().get_cell(row, col)),
+                new_cell: None,
+            })
+            .collect();
         if !positions.is_empty() {
             self.workbook.clear_cells_on_active(positions);
         }
@@ -186,6 +190,15 @@ impl App {
 
         let dest_row = self.selected_row;
         let dest_col = self.selected_col;
+        // Grow the sheet to fit the block; only cells past Excel's grid are
+        // left out (the sheet's current size used to clip the paste).
+        let (max_row_off, max_col_off) = clipboard
+            .cells
+            .iter()
+            .fold((0, 0), |(mr, mc), (r, c, _)| (mr.max(*r), mc.max(*c)));
+        self.workbook
+            .current_sheet_mut()
+            .grow_to_fit(dest_row + max_row_off, dest_col + max_col_off);
 
         // Compute all new cells first (evaluator borrows spreadsheet immutably).
         // One clock snapshot for the whole paste so any pasted =NOW() cells
@@ -245,12 +258,21 @@ impl App {
         if !batch.is_empty() {
             self.record_action(UndoAction::Batch(batch));
         }
-        self.status_message = Some(format!("Pasted {} cell(s)", clipboard.cells.len()));
+        self.status_message = Some(paste_status("Pasted", new_cells.len(), clipboard.cells.len() - new_cells.len()));
     }
 
     fn paste_tsv(&mut self, text: &str) {
         let dest_row = self.selected_row;
         let dest_col = self.selected_col;
+        // Same as `paste`: grow to fit, skip only what lies past Excel's grid.
+        let (mut last_row, mut last_col) = (dest_row, dest_col);
+        for (row_offset, line) in text.lines().enumerate().filter(|(_, l)| !l.is_empty()) {
+            let n = line.split('\t').count();
+            last_row = last_row.max(dest_row + row_offset);
+            last_col = last_col.max(dest_col + n - 1);
+        }
+        self.workbook.current_sheet_mut().grow_to_fit(last_row, last_col);
+        let mut outside = 0usize;
         let mut batch = Vec::new();
         let mut writes: Vec<(usize, usize, CellData)> = Vec::new();
 
@@ -260,6 +282,7 @@ impl App {
                 let target_row = dest_row + row_offset;
                 let target_col = dest_col + col_offset;
                 if target_row >= self.workbook.current_sheet().rows || target_col >= self.workbook.current_sheet().cols {
+                    outside += 1;
                     continue;
                 }
                 let old = if self.workbook.current_sheet().cells.contains_key(&(target_row, target_col)) {
@@ -343,7 +366,7 @@ impl App {
         if !batch.is_empty() {
             self.record_action(UndoAction::Batch(batch));
         }
-        self.status_message = Some(format!("Pasted {} cell(s) from system clipboard", count));
+        self.status_message = Some(paste_status("Pasted from system clipboard:", count, outside));
     }
 
     pub fn insert_row(&mut self) {
@@ -449,10 +472,89 @@ impl App {
 
 }
 
+/// Status line after a paste, naming any cells past Excel's grid.
+fn paste_status(prefix: &str, pasted: usize, outside: usize) -> String {
+    if outside == 0 {
+        format!("{} {} cell(s)", prefix, pasted)
+    } else {
+        format!(
+            "{} {} cell(s); {} beyond the {} x {} grid were left out",
+            prefix,
+            pasted,
+            outside,
+            crate::domain::Spreadsheet::MAX_ROWS,
+            crate::domain::Spreadsheet::MAX_COLS
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::CellData;
+
+    fn block_3x3() -> App {
+        let mut app = App::default();
+        for r in 0..3 {
+            for c in 0..3 {
+                app.set_cell_with_undo(r, c, CellData { value: format!("{}{}", r, c), ..CellData::default() });
+            }
+        }
+        app.selection_start = Some((0, 0));
+        app.selection_end = Some((2, 2));
+        app.copy_selection();
+        app.clear_selection();
+        app
+    }
+
+    #[test]
+    fn paste_at_the_sheet_edge_grows_the_sheet_instead_of_dropping_cells() {
+        let mut app = block_3x3();
+        let (last_row, last_col) = (app.workbook.current_sheet().rows - 1, app.workbook.current_sheet().cols - 1);
+        app.selected_row = last_row;
+        app.selected_col = last_col;
+        app.paste();
+        let sheet = app.workbook.current_sheet();
+        for r in 0..3 {
+            for c in 0..3 {
+                assert_eq!(sheet.get_cell(last_row + r, last_col + c).value, format!("{}{}", r, c));
+            }
+        }
+        assert_eq!((sheet.rows, sheet.cols), (last_row + 3, last_col + 3));
+        assert_eq!(app.status_message.as_deref(), Some("Pasted 9 cell(s)"));
+
+        // One undo step removes the whole paste.
+        app.undo();
+        assert_eq!(app.workbook.current_sheet().get_cell(last_row + 2, last_col + 2).value, "");
+    }
+
+    #[test]
+    fn paste_past_excels_grid_leaves_out_only_the_cells_beyond_it() {
+        let mut app = block_3x3();
+        app.workbook.current_sheet_mut().rows = Spreadsheet::MAX_ROWS;
+        app.selected_row = Spreadsheet::MAX_ROWS - 1;
+        app.selected_col = 0;
+        app.paste();
+        let sheet = app.workbook.current_sheet();
+        assert_eq!(sheet.rows, Spreadsheet::MAX_ROWS);
+        assert_eq!(sheet.get_cell(Spreadsheet::MAX_ROWS - 1, 2).value, "02");
+        assert!(!sheet.cells.keys().any(|&(r, _)| r >= Spreadsheet::MAX_ROWS));
+        let status = app.status_message.clone().unwrap();
+        assert!(status.starts_with("Pasted 3 cell(s); 6 beyond"), "{}", status);
+    }
+
+    #[test]
+    fn plain_text_paste_at_the_sheet_edge_grows_the_sheet() {
+        let mut app = App::default();
+        let (last_row, last_col) = (app.workbook.current_sheet().rows - 1, app.workbook.current_sheet().cols - 1);
+        app.selected_row = last_row;
+        app.selected_col = last_col;
+        app.paste_tsv("a\tb\tc\n1\t2\t3\n");
+        let sheet = app.workbook.current_sheet();
+        assert_eq!(sheet.get_cell(last_row, last_col + 2).value, "c");
+        assert_eq!(sheet.get_cell(last_row + 1, last_col + 2).value, "3");
+        assert_eq!(app.status_message.as_deref(), Some("Pasted from system clipboard: 6 cell(s)"));
+    }
 
     #[test]
     fn insert_and_delete_several_rows_and_columns_undo_as_one_step() {

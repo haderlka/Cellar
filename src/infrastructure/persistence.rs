@@ -81,7 +81,13 @@ impl FileRepository {
                 if looks_like_workbook {
                     crate::domain::models::migrate_workbook_json(&mut raw)?;
                 }
-                if let Ok(mut workbook) = serde_json::from_value::<Workbook>(raw.clone()) {
+                let parsed = serde_json::from_value::<Workbook>(raw.clone());
+                // A file with `sheets` is a workbook: report why it didn't
+                // parse instead of the legacy format's "missing field `cells`".
+                if looks_like_workbook && let Err(e) = &parsed {
+                    return Err(format!("Invalid file format - {}", e));
+                }
+                if let Ok(mut workbook) = parsed {
                     // Validate invariants: a file with `active_sheet` past
                     // `sheets.len()` or mismatched `sheet_names.len()` would
                     // panic on the first UI read. The order here matters:
@@ -109,6 +115,11 @@ impl FileRepository {
                     if workbook.active_sheet >= workbook.sheets.len() {
                         workbook.active_sheet = 0;
                     }
+                    for (sheet, name) in workbook.sheets.iter_mut().zip(&workbook.sheet_names) {
+                        sheet
+                            .sanitize_dimensions()
+                            .map_err(|e| format!("Invalid file format - sheet '{}': {}", name, e))?;
+                    }
                     // Pre-PR-1 files have no sheet_ids; allocate now so
                     // the unified graph has stable identities. Files saved
                     // by PR-1+ carry their own IDs and ensure_* no-ops.
@@ -117,7 +128,10 @@ impl FileRepository {
                 }
                 // Fall back to single spreadsheet format
                 match serde_json::from_str::<Spreadsheet>(&content) {
-                    Ok(spreadsheet) => {
+                    Ok(mut spreadsheet) => {
+                        spreadsheet
+                            .sanitize_dimensions()
+                            .map_err(|e| format!("Invalid file format - {}", e))?;
                         let mut wb = Workbook::from_spreadsheet(spreadsheet);
                         wb.build_dep_graph_from_scratch();
                         Ok((wb, filename.to_string()))
@@ -446,5 +460,18 @@ mod tests {
         assert_eq!(loaded.sheets.len(), 1);
         assert_eq!(loaded.sheet_names[0], "Sheet1");
         assert_eq!(loaded.sheets[0].get_cell(0, 0).value, "Legacy");
+    }
+
+    #[test]
+    fn test_load_workbook_with_zero_sized_sheet() {
+        // A hand-edited file: the GUI indexes `rows - 1` and `cols - 1`.
+        let mut wb = Workbook::default();
+        wb.sheets[0].rows = 0;
+        wb.sheets[0].cols = 0;
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let file_path = temp_file.path().to_str().unwrap();
+        FileRepository::save_workbook(&wb, file_path).unwrap();
+        let (loaded, _) = FileRepository::load_workbook(file_path).unwrap();
+        assert_eq!((loaded.sheets[0].rows, loaded.sheets[0].cols), (1, 1));
     }
 }

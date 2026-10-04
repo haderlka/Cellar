@@ -34,10 +34,14 @@ pub fn read_range(wb: &Workbook, host: usize, reference: &str) -> Vec<String> {
         return Vec::new();
     };
     let Some(sheet) = wb.sheets.get(sheet_idx) else { return Vec::new() };
+    let (last_r, last_c) = sheet.last_cell();
+    let (r0, r1) = (r0.min(r1), r0.max(r1));
+    let (c0, c1) = (c0.min(c1), c0.max(c1));
+    let (r1, c1) = (r1.min(last_r.max(r0)), c1.min(last_c.max(c0)));
     // Cap so a whole-column reference can't stall rendering.
     let mut out = Vec::new();
-    for r in r0.min(r1)..=r0.max(r1) {
-        for c in c0.min(c1)..=c0.max(c1) {
+    for r in r0..=r1 {
+        for c in c0..=c1 {
             out.push(sheet.cells.get(&(r, c)).map(|cd| cd.value.clone()).unwrap_or_default());
             if out.len() >= 10_000 {
                 return out;
@@ -48,7 +52,18 @@ pub fn read_range(wb: &Workbook, host: usize, reference: &str) -> Vec<String> {
 }
 
 pub fn numbers(values: &[String]) -> Vec<Option<f64>> {
-    values.iter().map(|v| v.trim().parse::<f64>().ok()).collect()
+    values.iter().map(|v| plottable(v.trim().parse::<f64>().ok())).collect()
+}
+
+/// Largest magnitude a chart plots. Axis code (egui_plot, plotters) works
+/// with the span `max - min` plus padding, which overflows to infinity
+/// near `f64::MAX` and makes tick generation loop forever.
+pub const PLOT_LIMIT: f64 = 1e300;
+
+/// A value as a chart can draw it: NaN/infinite are gaps (Rust also parses
+/// "NaN" and "inf" text), huge magnitudes are clamped to `PLOT_LIMIT`.
+pub fn plottable(v: Option<f64>) -> Option<f64> {
+    v.filter(|x| x.is_finite()).map(|x| x.clamp(-PLOT_LIMIT, PLOT_LIMIT))
 }
 
 /// Data for a range-based (non-pivot) chart on sheet `host`.
@@ -94,4 +109,18 @@ pub fn resolve_chart_data(wb: &Workbook, host: usize, spec: &ChartSpec) -> Resul
         return Err("Add a field to the PivotTable's Values area to chart it.".into());
     }
     Ok(ChartData { categories: out.chart.categories, series: out.chart.series })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chart_numbers_skip_nan_and_clamp_huge_values() {
+        let v: Vec<String> = ["1", "NaN", "inf", "-infinity", "1e308", "-1e308", "x", ""].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            numbers(&v),
+            vec![Some(1.0), None, None, None, Some(PLOT_LIMIT), Some(-PLOT_LIMIT), None, None]
+        );
+    }
 }

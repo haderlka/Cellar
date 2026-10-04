@@ -3,18 +3,18 @@
 //! the regex is invalid.
 
 /// Performs case-insensitive string replacement, preserving the replacement text as-is.
+/// Matches through a case-insensitive regex of the escaped needle rather
+/// than by offsets into `text.to_lowercase()`: lowercasing can change a
+/// character's byte length ('ẞ', 'İ', the Kelvin sign), so those offsets
+/// don't line up with `text` and slicing with them panics.
 fn case_insensitive_replace(text: &str, search: &str, replacement: &str) -> String {
-    let lower_text = text.to_lowercase();
-    let lower_search = search.to_lowercase();
-    let mut result = String::new();
-    let mut start = 0;
-    while let Some(pos) = lower_text[start..].find(&lower_search) {
-        result.push_str(&text[start..start + pos]);
-        result.push_str(replacement);
-        start += pos + search.len();
+    if search.is_empty() {
+        return text.to_string();
     }
-    result.push_str(&text[start..]);
-    result
+    match regex::RegexBuilder::new(&regex::escape(search)).case_insensitive(true).build() {
+        Ok(re) => re.replace_all(text, regex::NoExpand(replacement)).into_owned(),
+        Err(_) => text.to_string(),
+    }
 }
 
 /// Search matcher that honors the regex and case-sensitive flags.
@@ -66,5 +66,22 @@ impl TextMatcher {
         } else {
             case_insensitive_replace(hay, &self.needle, replacement)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn case_insensitive_replace_handles_case_changes_that_change_byte_length() {
+        // 'ẞ' (3 bytes) lowercases to 'ß' (2 bytes); offsets into the
+        // lowercased text used to be applied to the original and panic.
+        let m = TextMatcher::new("x", false, false);
+        assert_eq!(m.replace_all("ẞẞxX", "y"), "ẞẞyy");
+        let m = TextMatcher::new("ß", false, false);
+        assert_eq!(m.replace_all("aẞb", "s"), "asb");
+        let m = TextMatcher::new("a.b", false, false);
+        assert_eq!(m.replace_all("A.B axb", "-"), "- axb");
     }
 }

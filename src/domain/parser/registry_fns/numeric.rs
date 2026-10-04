@@ -446,22 +446,25 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
             let scale = 10f64.powi(digits);
             Ok(Value::Number((n * scale).trunc() / scale))
         });
-        reg.register_function("ATAN", |args| Ok(Value::Number(args[0].to_number().atan())));
-        reg.register_function("ASIN", |args| Ok(Value::Number(args[0].to_number().asin())));
-        reg.register_function("ACOS", |args| Ok(Value::Number(args[0].to_number().acos())));
-        reg.register_function("SINH", |args| Ok(Value::Number(args[0].to_number().sinh())));
-        reg.register_function("COSH", |args| Ok(Value::Number(args[0].to_number().cosh())));
-        reg.register_function("TANH", |args| Ok(Value::Number(args[0].to_number().tanh())));
-        reg.register_function("SIN", |args| Ok(Value::Number(args[0].to_number().sin())));
-        reg.register_function("COS", |args| Ok(Value::Number(args[0].to_number().cos())));
-        reg.register_function("TAN", |args| Ok(Value::Number(args[0].to_number().tan())));
+        reg.register_function("ATAN", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().atan())) });
+        reg.register_function("ASIN", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().asin())) });
+        reg.register_function("ACOS", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().acos())) });
+        reg.register_function("SINH", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().sinh())) });
+        reg.register_function("COSH", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().cosh())) });
+        reg.register_function("TANH", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().tanh())) });
+        reg.register_function("SIN", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().sin())) });
+        reg.register_function("COS", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().cos())) });
+        reg.register_function("TAN", |args| { if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); } Ok(Value::Number(args[0].to_number().tan())) });
         reg.register_function("DEGREES", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             Ok(Value::Number(args[0].to_number().to_degrees()))
         });
         reg.register_function("RADIANS", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             Ok(Value::Number(args[0].to_number().to_radians()))
         });
         reg.register_function("FACT", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             let n_raw = args[0].to_number();
             if n_raw < 0.0 || !n_raw.is_finite() {
                 return Ok(Value::Error(ErrorKind::Num));
@@ -493,6 +496,11 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
             for i in 0..k {
                 r *= (n - i) as f64;
                 r /= (i + 1) as f64;
+                // Overflows within ~1000 steps for any large k; stopping
+                // here keeps `COMBIN(10^19, 10^18)` from looping forever.
+                if !r.is_finite() {
+                    return Ok(Value::Error(ErrorKind::Num));
+                }
             }
             Ok(Value::Number(r))
         });
@@ -574,6 +582,7 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
             Ok(Value::Number((n / m).round() * m))
         });
         reg.register_function("EVEN", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             let n = args[0].to_number();
             let v = if n >= 0.0 {
                 (n / 2.0).ceil() * 2.0
@@ -583,6 +592,7 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
             Ok(Value::Number(v))
         });
         reg.register_function("ODD", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             let n = args[0].to_number();
             let v = if n >= 0.0 {
                 let c = ((n + 1.0) / 2.0).ceil() * 2.0 - 1.0;

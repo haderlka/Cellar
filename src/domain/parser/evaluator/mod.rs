@@ -349,7 +349,7 @@ impl<'a> ExpressionEvaluator<'a> {
                     BinaryOp::Concatenate => {
                         let left_str = left_val.to_string();
                         let right_str = right_val.to_string();
-                        Ok(Value::String(format!("{}{}", left_str, right_str)))
+                        Ok(crate::domain::parser::text_value(format!("{}{}", left_str, right_str)))
                     }
                     BinaryOp::Less => Ok(Value::Number(if cmp_ord(&left_val, &right_val) == std::cmp::Ordering::Less { 1.0 } else { 0.0 })),
                     BinaryOp::LessEqual => Ok(Value::Number(if cmp_ord(&left_val, &right_val) != std::cmp::Ordering::Greater { 1.0 } else { 0.0 })),
@@ -454,7 +454,11 @@ impl<'a> ExpressionEvaluator<'a> {
                 let func = self.function_registry.get_function(name)
                     .ok_or_else(|| format!("Unknown function: {}", name))?;
                 let arg_values = self.evaluate_function_args(args)?;
-                func(&arg_values)
+                // Built-ins are plain functions of their arguments; a bug in
+                // one (an unchecked `args[i]`) should cost this cell an
+                // error, not the whole application.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(&arg_values)))
+                    .unwrap_or_else(|_| Err(format!("{}: internal error", name)))
             }
         }
     }

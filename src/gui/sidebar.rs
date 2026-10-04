@@ -6,6 +6,15 @@ use eframe::egui::{self, RichText, Ui};
 
 use crate::app::GuiApp;
 
+/// A card's Delete button. Cards are drawn by index, so the removal waits
+/// until the whole sidebar has been drawn; removing mid-loop would shift
+/// the remaining indices (and index past the end of the chart list).
+#[derive(Clone, Copy)]
+pub enum SidebarDelete {
+    Pivot(usize),
+    Chart(usize),
+}
+
 impl GuiApp {
     pub fn sidebar(&mut self, root: &mut Ui) {
         egui::Panel::right("sidebar")
@@ -42,13 +51,14 @@ impl GuiApp {
                 ui.separator();
 
                 let pivot_count = self.app.workbook.current_sheet().pivots.len();
-                if self.pivots.editing.is_some_and(|i| i >= pivot_count) {
+                let editing = self.editing_pivot();
+                if editing.is_none() {
                     self.pivots.editing = None;
                 }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if let Some(i) = self.pivots.editing {
+                        if let Some(i) = editing {
                             // Editing: field pane, then just this pivot and its charts.
                             egui::Frame::group(ui.style()).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
@@ -89,16 +99,25 @@ impl GuiApp {
                             .map(|p| p.name.clone())
                             .collect();
                         for ci in 0..chart_count {
-                            let linked = self.app.workbook.current_sheet().charts[ci]
-                                .pivot
-                                .as_ref()
-                                .is_some_and(|p| pivot_names.contains(p));
+                            let linked = self.app.workbook.current_sheet().charts.get(ci).is_some_and(|c| {
+                                c.pivot.as_ref().is_some_and(|p| pivot_names.contains(p))
+                            });
                             if !linked {
                                 self.chart_card(ui, ci);
                             }
                         }
                     });
             });
+        match self.sidebar_delete.take() {
+            Some(SidebarDelete::Pivot(i)) => {
+                if self.editing_pivot() == Some(i) {
+                    self.pivots.editing = None;
+                }
+                self.app.remove_pivot(i);
+            }
+            Some(SidebarDelete::Chart(i)) => self.app.remove_chart(i),
+            None => {}
+        }
     }
 
     fn pivot_chart_cards(&mut self, ui: &mut Ui, pivot: usize) {
@@ -131,7 +150,7 @@ impl GuiApp {
         let Some(spec) = self.app.workbook.current_sheet().pivots.get(i).cloned() else {
             return;
         };
-        let editing = self.pivots.editing == Some(i);
+        let editing = self.editing_pivot() == Some(i);
         let mut delete = false;
         let mut chart = false;
         let mut fields = false;
@@ -162,14 +181,13 @@ impl GuiApp {
         });
         ui.add_space(6.0);
         if fields {
-            self.pivots.editing = Some(i);
+            self.set_editing_pivot(i);
         }
         if chart {
             self.open_pivot_chart_dialog(&spec);
         }
         if delete {
-            self.pivots.editing = None;
-            self.app.remove_pivot(i);
+            self.sidebar_delete = Some(SidebarDelete::Pivot(i));
         }
     }
 }

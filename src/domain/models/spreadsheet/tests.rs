@@ -430,3 +430,35 @@ fn test_cell_data_with_format() {
     assert!(matches!(fmt.number_format, NumberFormat::Currency { .. }));
 }
 
+
+#[test]
+fn overlong_references_are_rejected_instead_of_overflowing() {
+    assert_eq!(Spreadsheet::parse_column_label("XFD"), Some(16383));
+    assert_eq!(Spreadsheet::parse_column_label("xfd"), Some(16383));
+    assert_eq!(Spreadsheet::parse_column_label("ZZZZZZZZZZZZZZZZZZZZ"), None);
+    assert_eq!(Spreadsheet::parse_cell_reference("ZZZZZZZZZZZZZZZZZZZZ1"), None);
+    assert_eq!(Spreadsheet::parse_cell_reference("A99999999999"), None);
+    assert_eq!(Spreadsheet::parse_cell_reference("B2"), Some((1, 1)));
+}
+
+#[test]
+fn sanitize_dimensions_makes_hand_edited_sizes_usable() {
+    let mut sheet = Spreadsheet { rows: 0, cols: 0, ..Spreadsheet::default() };
+    sheet.sanitize_dimensions().unwrap();
+    assert_eq!((sheet.rows, sheet.cols), (1, 1));
+
+    // Cells beyond the stored size grow it so they are visible.
+    sheet.cells.insert((499, 40), CellData { value: "x".into(), ..CellData::default() });
+    sheet.sanitize_dimensions().unwrap();
+    assert_eq!((sheet.rows, sheet.cols), (500, 41));
+
+    sheet.rows = usize::MAX;
+    sheet.column_widths.insert(0, usize::MAX);
+    sheet.sanitize_dimensions().unwrap();
+    assert_eq!(sheet.rows, 1_048_576);
+    assert_eq!(sheet.get_column_width(0), 255);
+
+    // A cell outside Excel's grid makes the file invalid.
+    sheet.cells.insert((99_999_999, 0), CellData { value: "far".into(), ..CellData::default() });
+    assert!(sheet.sanitize_dimensions().is_err());
+}

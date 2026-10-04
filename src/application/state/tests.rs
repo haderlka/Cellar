@@ -395,3 +395,26 @@ fn test_parse_column_label() {
     assert_eq!(Spreadsheet::parse_column_label("1"), None);
 }
 
+
+#[test]
+fn undo_and_redo_of_a_cell_edit_apply_to_the_sheet_it_was_made_on() {
+    let mut app = App::default();
+    app.workbook.add_sheet("Sheet2".to_string());
+    app.set_cell_with_undo(0, 0, CellData { value: "on sheet 1".into(), ..CellData::default() });
+    app.switch_to_sheet(1);
+    app.set_cell_with_undo(0, 0, CellData { value: "on sheet 2".into(), ..CellData::default() });
+    app.switch_to_sheet(0);
+
+    // The last edit was on Sheet2: undo goes there and clears it, leaving
+    // Sheet1 alone.
+    app.undo();
+    assert_eq!(app.workbook.active_sheet, 1);
+    assert_eq!(app.workbook.sheets[1].get_cell(0, 0).value, "");
+    assert_eq!(app.workbook.sheets[0].get_cell(0, 0).value, "on sheet 1");
+
+    app.switch_to_sheet(0);
+    app.redo();
+    assert_eq!(app.workbook.active_sheet, 1);
+    assert_eq!(app.workbook.sheets[1].get_cell(0, 0).value, "on sheet 2");
+    assert_eq!(app.workbook.sheets[0].get_cell(0, 0).value, "on sheet 1");
+}

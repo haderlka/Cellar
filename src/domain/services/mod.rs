@@ -100,7 +100,7 @@ pub use executor::{
     CalcError, ParallelExecutor, RecalcContext, RecalcExecutor, RecalcPlan, SequentialExecutor,
 };
 pub use file_writer::{set_file_writer, write_file, FileWriter};
-pub use chart_data::{numbers, range_chart_data, read_range, resolve_chart_data, ChartData};
+pub use chart_data::{numbers, plottable, range_chart_data, read_range, resolve_chart_data, ChartData};
 pub use markdown::{range_to_markdown, sheet_to_markdown, used_range, workbook_to_markdown};
 pub use pivot::{compare_labels, compute_pivot, PivotCell, PivotCellKind, PivotChartData, PivotData, PivotOutput};
 pub use http::{http_fetch, set_http_fetcher, HttpFetchResult, HttpFetcher};

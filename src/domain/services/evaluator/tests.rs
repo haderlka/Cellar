@@ -3427,3 +3427,44 @@ fn agent4_workbook_load_pads_sheet_names() {
     let _ = std::fs::remove_file(&path);
 }
 
+
+#[test]
+fn one_argument_functions_without_arguments_are_errors_not_panics() {
+    let sheet = create_test_spreadsheet();
+    let evaluator = FormulaEvaluator::new(&sheet);
+    for f in ["SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "SINH", "COSH", "TANH", "DEGREES", "RADIANS",
+              "EVEN", "ODD", "FACT", "HOUR", "MINUTE", "SECOND", "UNICHAR", "UNICODE"] {
+        assert_eq!(evaluator.evaluate_formula(&format!("={}()", f)), "#VALUE!", "{}()", f);
+    }
+}
+
+#[test]
+fn replace_past_the_end_appends() {
+    let sheet = create_test_spreadsheet();
+    let evaluator = FormulaEvaluator::new(&sheet);
+    assert_eq!(evaluator.evaluate_formula("=REPLACE(\"abc\",9,1,\"x\")"), "abcx");
+    assert_eq!(evaluator.evaluate_formula("=REPLACE(\"abc\",10^15,10^15,\"x\")"), "abcx");
+    assert_eq!(evaluator.evaluate_formula("=REPLACE(\"abc\",2,1,\"x\")"), "axc");
+}
+
+#[test]
+fn text_longer_than_excels_limit_is_an_error_not_an_allocation() {
+    let sheet = create_test_spreadsheet();
+    let evaluator = FormulaEvaluator::new(&sheet);
+    // Each of these would otherwise try to allocate gigabytes or more.
+    assert_eq!(evaluator.evaluate_formula("=REPT(\"ab\",10^12)"), "#VALUE!");
+    assert_eq!(evaluator.evaluate_formula("=SUBSTITUTE(REPT(\"a\",30000),\"a\",REPT(\"b\",30000))"), "#VALUE!");
+    assert_eq!(evaluator.evaluate_formula("=REPT(\"a\",20000)&REPT(\"a\",20000)"), "#VALUE!");
+    assert_eq!(evaluator.evaluate_formula("=LEN(FIXED(1,10^9))"), "129");
+    // At the limit is fine.
+    assert_eq!(evaluator.evaluate_formula("=LEN(REPT(\"€\",32767))"), "32767");
+}
+
+#[test]
+fn huge_date_serials_do_not_overflow() {
+    let sheet = create_test_spreadsheet();
+    let evaluator = FormulaEvaluator::new(&sheet);
+    for f in ["=YEAR(10^300)", "=EDATE(-10^300,1)", "=TEXT(-10^300,\"yyyy\")", "=DATEDIF(1,10^12,\"MD\")"] {
+        let _ = evaluator.evaluate_formula(f);
+    }
+}

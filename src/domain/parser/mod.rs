@@ -634,7 +634,10 @@ pub fn serial_to_date_pub(serial: f64) -> (i32, u32, u32) {
 }
 
 pub(super) fn serial_to_date(serial: f64) -> (i32, u32, u32) {
-    let z = (serial as i64) - 25569 + 719468;
+    // Far outside Excel's 1900–9999 range the date is meaningless anyway;
+    // clamp so the arithmetic below (and callers' year * 12) can't overflow.
+    const LIMIT: f64 = 1e10;
+    let z = (serial.clamp(-LIMIT, LIMIT) as i64) - 25569 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
@@ -817,6 +820,26 @@ pub fn now_serial() -> f64 {
 /// the previous absolute-1e-12 floor lumped far-apart small numbers
 /// together, breaking VLOOKUP / MATCH / numeric COUNTIF equality on
 /// scientific-data sheets.
+/// Longest text a formula can produce, in characters (Excel's limit).
+/// Text-building functions check it before allocating: `REPT("ab", 10^12)`
+/// or a chain of `=A1&A1` would otherwise ask for terabytes, and a failed
+/// allocation aborts the process.
+pub const MAX_TEXT_LEN: usize = 32_767;
+
+/// `s` as a text value, or `#VALUE!` past [`MAX_TEXT_LEN`].
+pub(crate) fn text_value(s: String) -> Value {
+    if s.len() > MAX_TEXT_LEN && s.chars().count() > MAX_TEXT_LEN {
+        Value::Error(ErrorKind::Value)
+    } else {
+        Value::String(s)
+    }
+}
+
+/// Whether text of `chars` characters is over [`MAX_TEXT_LEN`].
+pub(crate) fn text_too_long(chars: usize) -> bool {
+    chars > MAX_TEXT_LEN
+}
+
 pub(crate) fn numbers_equal(l: f64, r: f64) -> bool {
     if l == r {
         return true;

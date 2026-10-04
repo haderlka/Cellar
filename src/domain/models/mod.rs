@@ -21,7 +21,7 @@ pub(crate) fn is_default<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
-pub use style::{NumberFormat, TerminalColor, CellStyle, CellFormat, format_cell_value};
+pub use style::{NumberFormat, TerminalColor, CellStyle, CellFormat, format_cell_value, MAX_DECIMALS};
 pub use refs::{
     replace_sheet_refs_with_ref_error,
     rewrite_sheet_refs,

@@ -5,14 +5,17 @@
 //! function is called from `registry::FunctionRegistry::register_builtin_functions`.
 
 #![allow(unused_imports)]
-use crate::domain::parser::{FunctionRegistry, Value, ErrorKind, flatten_args, shape_of, broadcast_binary, criteria_matches, add_commas, glob_match, date_to_serial, serial_to_date, parse_iso_date, days_in_month, today_serial, now_serial};
+use crate::domain::parser::{text_too_long, text_value, FunctionRegistry, Value, ErrorKind, flatten_args, shape_of, broadcast_binary, criteria_matches, add_commas, glob_match, date_to_serial, serial_to_date, parse_iso_date, days_in_month, today_serial, now_serial};
 
 /// Register all `string` builtin functions on `reg`.
 pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
         reg.register_function("CONCAT", |args| {
             let flat = flatten_args(args);
-            let result = flat.iter().map(|v| v.to_string()).collect::<String>();
-            Ok(Value::String(result))
+            let parts: Vec<String> = flat.iter().map(|v| v.to_string()).collect();
+            if text_too_long(parts.iter().map(|p| p.chars().count()).sum()) {
+                return Ok(Value::Error(ErrorKind::Value));
+            }
+            Ok(Value::String(parts.concat()))
         });
         reg.register_function("LEN", |args| {
             if args.len() != 1 {
@@ -140,6 +143,14 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
                 if old.is_empty() {
                     Ok(Value::String(text))
                 } else {
+                    // Size the result before building it: many matches
+                    // times a long replacement can be gigabytes.
+                    let hits = text.matches(&old).count();
+                    let (old_n, new_n) = (old.chars().count(), new.chars().count());
+                    let len = (text.chars().count() - hits * old_n).saturating_add(hits.saturating_mul(new_n));
+                    if text_too_long(len) {
+                        return Ok(Value::Error(ErrorKind::Value));
+                    }
                     Ok(Value::String(text.replace(&old, &new)))
                 }
             }
@@ -153,8 +164,9 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
                 let num_chars = args[2].to_number() as usize;
                 let new_text = args[3].to_string();
                 let chars: Vec<char> = text.chars().collect();
-                let start_idx = if start > 0 { start - 1 } else { 0 };
-                let end_idx = (start_idx + num_chars).min(chars.len());
+                // A start past the end appends, as in Excel.
+                let start_idx = start.saturating_sub(1).min(chars.len());
+                let end_idx = start_idx.saturating_add(num_chars).min(chars.len());
                 let mut result = chars[..start_idx].iter().collect::<String>();
                 result.push_str(&new_text);
                 if end_idx < chars.len() {
@@ -169,10 +181,14 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
             } else {
                 let text = args[0].to_string();
                 let count_raw = args[1].to_number();
-                if count_raw < 0.0 {
+                if count_raw < 0.0 || count_raw.is_nan() {
                     return Ok(Value::Error(ErrorKind::Value));
                 }
-                Ok(Value::String(text.repeat(count_raw as usize)))
+                let count = count_raw as usize;
+                if text_too_long(text.chars().count().saturating_mul(count)) {
+                    return Ok(Value::Error(ErrorKind::Value));
+                }
+                Ok(Value::String(text.repeat(count)))
             }
         });
         reg.register_function("EXACT", |args| {
@@ -294,6 +310,10 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
                     if ignore_empty && s.is_empty() { None } else { Some(s) }
                 })
                 .collect();
+            let delims = delim.chars().count().saturating_mul(parts.len().saturating_sub(1));
+            if text_too_long(parts.iter().map(|p| p.chars().count()).sum::<usize>().saturating_add(delims)) {
+                return Ok(Value::Error(ErrorKind::Value));
+            }
             Ok(Value::String(parts.join(&delim)))
         });
         reg.register_function("SEARCH", |args| {
@@ -407,6 +427,7 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
             Ok(Value::String(re.replace_all(&args[0].to_string(), replacement.as_str()).into_owned()))
         });
         reg.register_function("UNICHAR", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             let n = args[0].to_number() as u32;
             match char::from_u32(n) {
                 Some(c) => Ok(Value::String(c.to_string())),
@@ -414,6 +435,7 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
             }
         });
         reg.register_function("UNICODE", |args| {
+            if args.len() != 1 { return Ok(Value::Error(ErrorKind::Value)); }
             let s = args[0].to_string();
             match s.chars().next() {
                 Some(c) => Ok(Value::Number(c as u32 as f64)),
@@ -425,7 +447,9 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
                 return Ok(Value::Error(ErrorKind::Value));
             }
             let n = args[0].to_number();
-            let decimals = args.get(1).map(|v| v.to_number() as i32).unwrap_or(2);
+            // Excel allows at most 127 decimals; more would only pad zeros
+            // (and `10^9` of them is a gigabyte of text).
+            let decimals = args.get(1).map(|v| v.to_number() as i32).unwrap_or(2).min(127);
             let scale = 10f64.powi(decimals);
             let rounded = (n * scale).round() / scale;
             let sign = if rounded < 0.0 { "-" } else { "" };
@@ -447,7 +471,7 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
                 return Ok(Value::Error(ErrorKind::Value));
             }
             let n = args[0].to_number();
-            let decimals = args.get(1).map(|v| v.to_number() as i32).unwrap_or(2);
+            let decimals = args.get(1).map(|v| v.to_number() as i32).unwrap_or(2).min(127);
             let no_commas = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
             let mut s = format!("{:.*}", decimals.max(0) as usize, n);
             if !no_commas {

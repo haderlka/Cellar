@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use super::*;
 
+/// Most decimals a number format shows (Excel's limit). Formats come from
+/// hand-editable files; `decimals: 4000000000` would otherwise allocate
+/// gigabytes per cell drawn.
+pub const MAX_DECIMALS: u32 = 30;
+
 /// Number format for cell display.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NumberFormat {
@@ -155,7 +160,7 @@ pub fn format_cell_value(value: &str, format: &CellFormat) -> String {
         NumberFormat::General => value.to_string(),
         NumberFormat::Number { decimals, thousands_sep } => {
             if let Ok(n) = value.parse::<f64>() {
-                let formatted = format!("{:.prec$}", n, prec = *decimals as usize);
+                let formatted = format!("{:.prec$}", n, prec = (*decimals).min(MAX_DECIMALS) as usize);
                 if *thousands_sep {
                     add_thousands_separator(&formatted)
                 } else {
@@ -172,7 +177,7 @@ pub fn format_cell_value(value: &str, format: &CellFormat) -> String {
                 // ("$-42.50"). Format the absolute value, then prepend
                 // the sign manually so the symbol always sits next to
                 // the digits.
-                let abs_formatted = format!("{:.prec$}", n.abs(), prec = *decimals as usize);
+                let abs_formatted = format!("{:.prec$}", n.abs(), prec = (*decimals).min(MAX_DECIMALS) as usize);
                 let body = add_thousands_separator(&abs_formatted);
                 if n < 0.0 {
                     format!("-{}{}", symbol, body)
@@ -185,7 +190,7 @@ pub fn format_cell_value(value: &str, format: &CellFormat) -> String {
         }
         NumberFormat::Percentage { decimals } => {
             if let Ok(n) = value.parse::<f64>() {
-                format!("{:.prec$}%", n * 100.0, prec = *decimals as usize)
+                format!("{:.prec$}%", n * 100.0, prec = (*decimals).min(MAX_DECIMALS) as usize)
             } else {
                 value.to_string()
             }

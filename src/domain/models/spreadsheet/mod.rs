@@ -204,6 +204,60 @@ impl Default for Spreadsheet {
 }
 
 impl Spreadsheet {
+    /// Excel's grid: the most rows a sheet can have.
+    pub const MAX_ROWS: usize = 1_048_576;
+    /// Excel's grid: the most columns a sheet can have (XFD).
+    pub const MAX_COLS: usize = 16_384;
+
+    /// Grow the sheet so `(last_row, last_col)` is inside it, up to Excel's
+    /// grid. Never shrinks. Returns whether that cell now fits.
+    pub fn grow_to_fit(&mut self, last_row: usize, last_col: usize) -> bool {
+        self.rows = self.rows.max(last_row.saturating_add(1).min(Self::MAX_ROWS));
+        self.cols = self.cols.max(last_col.saturating_add(1).min(Self::MAX_COLS));
+        last_row < self.rows && last_col < self.cols
+    }
+
+    /// Make a loaded sheet's size usable: at least one row and column, big
+    /// enough to show every stored cell, and no larger than Excel's grid.
+    /// Files are hand-editable, and the GUI assumes `rows >= 1 && cols >= 1`.
+    /// A cell outside Excel's grid is an error rather than silently dropped:
+    /// everything that walks the used range would otherwise cover it.
+    pub fn sanitize_dimensions(&mut self) -> Result<(), String> {
+        const MAX_ROWS: usize = Spreadsheet::MAX_ROWS;
+        const MAX_COLS: usize = Spreadsheet::MAX_COLS;
+        if let Some(&(r, c)) = self.cells.keys().find(|&&(r, c)| r >= MAX_ROWS || c >= MAX_COLS) {
+            return Err(format!(
+                "cell at row {}, column {} is outside the {} x {} grid",
+                r + 1,
+                c + 1,
+                MAX_ROWS,
+                MAX_COLS
+            ));
+        }
+        let (last_r, last_c) = self.last_cell();
+        self.rows = self.rows.max(last_r + 1).clamp(1, MAX_ROWS);
+        self.cols = self.cols.max(last_c + 1).clamp(1, MAX_COLS);
+        // Excel's widest column is 255 characters; the grid turns widths
+        // into pixels, and an absurd one becomes an infinite layout.
+        const MAX_WIDTH: usize = 255;
+        self.default_column_width = self.default_column_width.clamp(1, MAX_WIDTH);
+        for w in self.column_widths.values_mut() {
+            *w = (*w).min(MAX_WIDTH);
+        }
+        self.column_widths.retain(|&c, _| c < MAX_COLS);
+        Ok(())
+    }
+
+    /// Last row and column that can hold anything: the sheet's size, or a
+    /// stored cell beyond it (spills). Ranges read for PivotTables and
+    /// charts stop here, so `A1:Z1000000` doesn't walk a million empty rows.
+    pub fn last_cell(&self) -> (usize, usize) {
+        self.cells.keys().fold(
+            (self.rows.saturating_sub(1), self.cols.saturating_sub(1)),
+            |(mr, mc), &(r, c)| (mr.max(r), mc.max(c)),
+        )
+    }
+
     /// Returns the cell at `(row, col)`, or a default empty cell if unset.
     ///
     /// ```
@@ -475,11 +529,7 @@ impl Spreadsheet {
         if label.is_empty() || !label.chars().all(|c| c.is_ascii_alphabetic()) {
             return None;
         }
-        let mut col = 0usize;
-        for ch in label.chars() {
-            col = col * 26 + (ch as usize - 'A' as usize + 1);
-        }
-        Some(col - 1)
+        Self::column_str_to_index(&label)
     }
 
     /// Parses Excel-style references like "A1" or "AA123" into `(row, col)`.
@@ -591,7 +641,8 @@ impl Spreadsheet {
             return None;
         }
         let col = Self::column_str_to_index(&col_str)?;
-        let row = row_str.parse::<usize>().ok()?.checked_sub(1)?;
+        // u32 keeps `row + 1` and friends far from overflow.
+        let row = row_str.parse::<u32>().ok()?.checked_sub(1)? as usize;
         Some((row, col, abs_row, abs_col))
     }
 
@@ -614,14 +665,17 @@ impl Spreadsheet {
             return None;
         }
         
-        let mut result = 0;
+        // Checked, and bounded like rows: a long run of letters would
+        // otherwise overflow.
+        let mut result: u32 = 0;
         for ch in col_str.chars() {
             if !ch.is_ascii_alphabetic() {
                 return None;
             }
-            result = result * 26 + (ch as usize - 'A' as usize + 1);
+            let digit = (ch.to_ascii_uppercase() as u8 - b'A' + 1) as u32;
+            result = result.checked_mul(26)?.checked_add(digit)?;
         }
-        Some(result - 1)
+        Some(result as usize - 1)
     }
 
     /// Custom width if set, else the spreadsheet's default.

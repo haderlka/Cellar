@@ -106,8 +106,11 @@ impl Layout {
         self.visible_rows.as_ref().map_or(self.rows, Vec::len)
     }
 
+    /// Row shown at display index `idx`. Callers clamp `idx` to
+    /// `row_count()`, which is 0 when every row is hidden, so fall back to
+    /// the last visible row (or `idx` itself) instead of indexing past the end.
     fn row_at(&self, idx: usize) -> usize {
-        self.visible_rows.as_ref().map_or(idx, |v| v[idx])
+        self.visible_rows.as_ref().map_or(idx, |v| v.get(idx).or(v.last()).copied().unwrap_or(idx))
     }
 
     fn index_of(&self, row: usize) -> Option<usize> {
@@ -134,6 +137,7 @@ impl Layout {
 
 impl GuiApp {
     pub fn show_grid(&mut self, ui: &mut Ui) {
+        self.clamp_selection();
         let sheet_idx = self.app.workbook.active_sheet;
         let layout = Layout::new(self.app.workbook.current_sheet(), self);
         let content = vec2(
@@ -189,6 +193,24 @@ impl GuiApp {
             });
     }
 
+    /// Keep the selection inside the sheet. Deleting columns/rows, undo and
+    /// redo shrink the sheet without touching the selection, and the grid
+    /// indexes column geometry by the selection's columns.
+    fn clamp_selection(&mut self) {
+        let sheet = self.app.workbook.current_sheet();
+        let (last_row, last_col) = (sheet.rows.saturating_sub(1), sheet.cols.saturating_sub(1));
+        let clamp = |p: &mut Option<(usize, usize)>| {
+            if let Some((r, c)) = p {
+                *r = (*r).min(last_row);
+                *c = (*c).min(last_col);
+            }
+        };
+        clamp(&mut self.app.selection_start);
+        clamp(&mut self.app.selection_end);
+        self.app.selected_row = self.app.selected_row.min(last_row);
+        self.app.selected_col = self.app.selected_col.min(last_col);
+    }
+
     /// Screen rect of the fill handle (bottom-right of the selection), when
     /// it is visible and usable.
     fn handle_rect(&self, layout: &Layout, cell_rect: &dyn Fn(usize, usize) -> Rect) -> Option<Rect> {
@@ -205,7 +227,8 @@ impl GuiApp {
 
     fn range_rect(layout: &Layout, cell_rect: &dyn Fn(usize, usize) -> Rect, ((ra, ca), (rb, cb)): CellRange) -> Option<Rect> {
         let (ia, ib) = (layout.index_of(ra.min(rb))?, layout.index_of(ra.max(rb))?);
-        Some(cell_rect(ia, ca.min(cb)).union(cell_rect(ib, ca.max(cb))))
+        let last_col = layout.cols().checked_sub(1)?;
+        Some(cell_rect(ia, ca.min(cb).min(last_col)).union(cell_rect(ib, ca.max(cb).min(last_col))))
     }
 
     /// While dragging the fill handle: outline the range being filled (or
@@ -367,10 +390,7 @@ impl GuiApp {
 
         // Selection, cursor, and formula-reference highlight.
         let body = painter.with_clip_rect(Rect::from_min_max(pos2(body_left, body_top), screen.max));
-        let range_rect = |(ra, ca): (usize, usize), (rb, cb): (usize, usize)| -> Option<Rect> {
-            let (ia, ib) = (layout.index_of(ra.min(rb))?, layout.index_of(ra.max(rb))?);
-            Some(cell_rect(ia, ca.min(cb)).union(cell_rect(ib, ca.max(cb))))
-        };
+        let range_rect = |a: (usize, usize), b: (usize, usize)| Self::range_rect(layout, cell_rect, (a, b));
         if let Some((a, b)) = self.app.get_selection_range()
             && let Some(rect) = range_rect(a, b)
         {

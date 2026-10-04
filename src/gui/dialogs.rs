@@ -9,6 +9,47 @@ use cellar::infrastructure::xlsx_convert::ConversionReport;
 use crate::app::GuiApp;
 use crate::charts::ChartDialog;
 
+const REPO_URL: &str = "https://github.com/haderlka/Cellar";
+const COFFEE_URL: &str = "https://buymeacoffee.com/haderlka";
+
+/// Buy Me a Coffee's yellow button, drawn rather than loaded from their
+/// CDN so the About window works offline. egui's font has no cup glyph,
+/// so the cup is painted.
+fn coffee_button(ui: &mut egui::Ui) -> egui::Response {
+    let font = egui::FontId::proportional(15.0);
+    let ink = egui::Color32::BLACK;
+    let galley = ui.painter().layout_no_wrap("Buy me a coffee".to_owned(), font, ink);
+    let size = egui::vec2(galley.size().x + 52.0, 36.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let fill = if response.hovered() {
+        egui::Color32::from_rgb(255, 228, 51)
+    } else {
+        egui::Color32::from_rgb(255, 221, 0)
+    };
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 8.0, fill);
+
+    // Cup: body, handle and two wisps of steam.
+    let stroke = egui::Stroke::new(1.6, ink);
+    let base = egui::pos2(rect.min.x + 14.0, rect.center().y + 7.0);
+    let cup = [
+        base + egui::vec2(0.0, -11.0),
+        base + egui::vec2(12.0, -11.0),
+        base + egui::vec2(10.5, 0.0),
+        base + egui::vec2(1.5, 0.0),
+    ];
+    painter.add(egui::Shape::convex_polygon(cup.to_vec(), egui::Color32::WHITE, stroke));
+    painter.circle_stroke(base + egui::vec2(13.0, -6.5), 3.0, stroke);
+    for dx in [3.5, 8.0] {
+        let x = base.x + dx;
+        painter.line_segment([egui::pos2(x, base.y - 14.0), egui::pos2(x + 1.5, base.y - 17.0)], stroke);
+        painter.line_segment([egui::pos2(x + 1.5, base.y - 17.0), egui::pos2(x, base.y - 20.0)], stroke);
+    }
+
+    painter.galley(egui::pos2(rect.min.x + 38.0, rect.center().y - galley.size().y / 2.0), galley, ink);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(COFFEE_URL)
+}
+
 #[derive(Default)]
 pub struct Dialogs {
     pub import_report: Option<ConversionReport>,
@@ -73,6 +114,18 @@ impl GuiApp {
                          easy to version, diff and merge.",
                     );
                 });
+                ui.separator();
+                ui.label(RichText::new("Source code").strong());
+                ui.label("Cellar is free and open source. Report issues or follow development on GitHub:");
+                ui.hyperlink(REPO_URL);
+                ui.add_space(4.0);
+                ui.label(RichText::new("Support Cellar").strong());
+                ui.label("If Cellar saves you time, you can support its development with a coffee:");
+                ui.add_space(2.0);
+                if coffee_button(ui).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(COFFEE_URL));
+                }
+                ui.add_space(4.0);
                 ui.separator();
                 ui.label(RichText::new("Built on tshts").strong());
                 ui.label(

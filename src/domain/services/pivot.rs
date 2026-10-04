@@ -47,6 +47,8 @@ impl PivotData {
         };
         let (r0, r1, c0, c1) = (r0.min(r1), r0.max(r1), c0.min(c1), c0.max(c1));
         let sheet = wb.sheets.get(sheet_idx).ok_or("Source sheet missing")?;
+        let (last_r, last_c) = sheet.last_cell();
+        let (r1, c1) = (r1.min(last_r.max(r0)), c1.min(last_c.max(c0)));
         let value = |r: usize, c: usize| sheet.cells.get(&(r, c)).map(|cd| cd.value.clone()).unwrap_or_default();
 
         let mut fields: Vec<String> = Vec::new();
@@ -658,7 +660,7 @@ pub fn compute_pivot(spec: &PivotSpec, data: &PivotData) -> Result<PivotOutput, 
                 (false, false) => cp.join(" / "),
                 (false, true) => format!("{} - {}", cp.join(" / "), value_caption(v)),
             };
-            let points = row_keys.iter().map(|rp| engine.shown(rp, cp, v)).collect();
+            let points = row_keys.iter().map(|rp| super::chart_data::plottable(engine.shown(rp, cp, v))).collect();
             chart.series.push((name, points));
         }
     }

@@ -453,6 +453,11 @@ fn is_currency(c: char) -> bool {
 fn rgb_attr(e: &BytesStart) -> Option<TerminalColor> {
     let hex = attr(e, b"rgb")?;
     // ARGB ("FFRRGGBB") or RGB.
+    // Checked first: byte slicing below would panic inside a multi-byte
+    // character of a malformed attribute.
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
     let hex = if hex.len() == 8 { &hex[2..] } else { hex.as_str() };
     if hex.len() != 6 {
         return None;
@@ -480,7 +485,7 @@ fn parse_sheet(xml: &str, xfs: &[Option<CellFormat>], out: &mut SheetExtras) {
                     // a per-column width; storing it would add hundreds of
                     // noise entries to the .cellar file.
                     let (min, max) = (min as usize, max as usize);
-                    if min >= 1 && max - min < 256 && attr(&e, b"hidden").as_deref() != Some("1") {
+                    if min >= 1 && max >= min && max - min < 256 && attr(&e, b"hidden").as_deref() != Some("1") {
                         let chars = width.round().max(3.0) as usize;
                         for c in min..=max {
                             out.column_widths.insert(c - 1, chars);
