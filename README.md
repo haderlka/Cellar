@@ -15,6 +15,10 @@
   <a href="https://github.com/SamuelSchlesinger/tshts">tshts</a>
 </p>
 
+<p align="center">
+  <a href="https://buymeacoffee.com/haderlka"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="40"></a>
+</p>
+
 ![Cellar with a workbook, a PivotTable and a PivotChart in the sidebar](docs/screenshot.png)
 
 ## Why Cellar?
@@ -234,6 +238,11 @@ The code follows tshts' layered design:
 The scenario tests in `tests/` type complete financial models (DCF,
 amortization, tax brackets, FIFO inventory…) into a workbook and compare
 every result with an independent Rust implementation.
+
+## Support
+
+Cellar is free and open source. If it saves you time, you can support its
+development on [Buy Me a Coffee](https://buymeacoffee.com/haderlka).
 
 ## Credits
 
