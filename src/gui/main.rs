@@ -5,16 +5,18 @@
 //! Runs on macOS, Windows and Linux.
 //!
 //! Usage:
-//!   cellar [FILE]                         open a .cellar, .xlsx or .csv file
+//!   cellar [FILE]                         open a .cellar file or any format
+//!                                         File → Import reads (.xlsx, .xls,
+//!                                         .ods, .csv, .tsv, .md, .json, …)
 //!
 //! Batch commands (no window):
-//!   cellar --convert IN.xlsx [OUT.cellar] convert Excel → .cellar (with report)
+//!   cellar --convert IN [OUT.cellar]      convert to .cellar (Excel/ODS: with report)
 //!   cellar --export-md IN [OUT.md]        all sheets as Markdown tables (values only)
 //!   cellar --export-charts IN [DIR] [--svg]
 //!                                         every chart as PNG (or SVG) into DIR
 //!   cellar --uninstall [--yes]            list (with --yes: remove) Cellar and
 //!                                         everything it stored; workbooks stay
-//! IN may be a .cellar or .xlsx file.
+//! IN may be a .cellar file or any importable format.
 
 // Windows: build as a GUI program so double-clicking cellar.exe doesn't open
 // a console window. The batch commands attach to the console they were
@@ -31,7 +33,7 @@ mod shortcuts;
 mod sidebar;
 
 use eframe::egui;
-use cellar::infrastructure::{atomic, chart_image, fetcher, uninstall, xlsx_convert, FileRepository};
+use cellar::infrastructure::{atomic, chart_image, fetcher, import, uninstall, FileRepository};
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -93,21 +95,27 @@ fn attach_parent_console() {
 #[cfg(not(windows))]
 fn attach_parent_console() {}
 
-/// `--convert IN [OUT.cellar]`: batch conversion for scripts. An `.xlsx`
-/// input is converted and its verification report printed; a `.cellar`
+/// `--convert IN [OUT.cellar]`: batch conversion for scripts. An imported
+/// file is converted (for Excel and ODS the verification report is
+/// printed); a `.cellar`
 /// input is rewritten in the canonical layout. Exit code 0 on success (even
 /// with formula differences, which are listed), 1 on failure.
 fn convert_cli(args: &[String]) -> i32 {
     let Some(input) = args.first() else {
-        eprintln!("usage: cellar --convert IN.xlsx [OUT.cellar]");
+        eprintln!("usage: cellar --convert IN [OUT.cellar]");
         return 1;
     };
     let output = args
         .get(1)
         .cloned()
         .unwrap_or_else(|| app::sibling_with_extension(input, "cellar"));
-    let result = if input.to_lowercase().ends_with(".xlsx") {
-        xlsx_convert::convert_xlsx_file(input, &output).map(|report| print!("{}", report.summary()))
+    let result = if import::ImportFormat::from_path(std::path::Path::new(input)).is_some() {
+        import::import_path(std::path::Path::new(input)).and_then(|imported| {
+            if let Some(report) = &imported.report {
+                print!("{}", report.summary());
+            }
+            FileRepository::save_workbook(&imported.workbook, &output).map(|_| ())
+        })
     } else {
         load_any(input).and_then(|wb| FileRepository::save_workbook(&wb, &output).map(|_| ()))
     };
@@ -123,10 +131,11 @@ fn convert_cli(args: &[String]) -> i32 {
     }
 }
 
-/// Load a .cellar or (converting it) an .xlsx file for the batch commands.
+/// Load a .cellar file, or import any other supported format, for the
+/// batch commands.
 fn load_any(path: &str) -> Result<cellar::domain::Workbook, String> {
-    if path.to_lowercase().ends_with(".xlsx") {
-        xlsx_convert::convert_xlsx(path).map(|(wb, _)| wb)
+    if import::ImportFormat::from_path(std::path::Path::new(path)).is_some() {
+        import::import_path(std::path::Path::new(path)).map(|imported| imported.workbook)
     } else {
         FileRepository::load_workbook(path).map(|(wb, _)| wb)
     }

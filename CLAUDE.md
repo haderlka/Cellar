@@ -33,7 +33,8 @@ src/
 │   │   └── registry_fns/    #   built-in functions by category (numeric, string, date, …)
 │   └── services/            # FormulaEvaluator, recalc executors, CsvExporter,
 │                            #   pivot.rs (PivotTable engine), chart_data.rs (resolve chart data),
-│                            #   markdown.rs (table export), autofill_pattern.rs (series detection)
+│                            #   markdown.rs (table export), import.rs (CSV/TSV/Markdown/JSON
+│                            #   text → sheets), autofill_pattern.rs (series detection)
 ├── application/state/       # App: the editing session used by the GUI
 │                            #   mod.rs (App, AppMode), undo.rs, editing.rs, clipboard.rs,
 │                            #   fill.rs (fill handle), formatting.rs, charts.rs, pivots.rs,
@@ -44,7 +45,8 @@ src/
 │   ├── xlsx.rs              #   .xlsx import (calamine) / export (hand-written)
 │   ├── xlsx_extras.rs       #   .xlsx formatting, widths, charts, pivots (quick-xml)
 │   ├── xlsx_pivot.rs        #   Excel PivotTable → PivotSpec
-│   ├── xlsx_convert.rs      #   Excel → Cellar conversion + verification report
+│   ├── xlsx_convert.rs      #   Excel/ODS → Cellar conversion + verification report
+│   ├── import.rs            #   ImportFormat: File → Import / Open of non-.cellar files
 │   ├── chart_image.rs       #   charts → PNG/SVG (plotters)
 │   ├── app_dirs.rs          #   where Cellar stores its own files (config, cache)
 │   ├── uninstall.rs         #   `cellar --uninstall`: data, terminal links, program

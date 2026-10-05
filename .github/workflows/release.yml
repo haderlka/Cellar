@@ -81,7 +81,7 @@ jobs:
           <key>LSMinimumSystemVersion</key><string>11.0</string>
           <key>NSHighResolutionCapable</key><true/>
           <!-- Finder opens .cellar files with Cellar (src/gui/open_files.rs);
-               Excel and CSV files list Cellar under "Open With". -->
+               spreadsheet and table files list Cellar under "Open With". -->
           <key>CFBundleDocumentTypes</key>
           <array>
             <dict>
@@ -98,7 +98,10 @@ jobs:
               <key>LSItemContentTypes</key>
               <array>
                 <string>org.openxmlformats.spreadsheetml.sheet</string>
+                <string>com.microsoft.excel.xls</string>
+                <string>org.oasis-open.opendocument.spreadsheet</string>
                 <string>public.comma-separated-values-text</string>
+                <string>public.tab-separated-values-text</string>
               </array>
             </dict>
           </array>

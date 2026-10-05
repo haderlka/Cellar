@@ -9,6 +9,7 @@ pub mod canonical_json;
 pub mod chart_image;
 pub mod persistence;
 pub mod fetcher;
+pub mod import;
 pub mod recent;
 pub mod autosave;
 pub mod sidecar;

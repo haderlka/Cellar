@@ -1,5 +1,5 @@
 //! Domain services: formula evaluation and recalculation, CSV, PivotTables,
-//! chart data, Markdown export.
+//! chart data, Markdown export, table import (`import`).
 //!
 //! This module provides the core formula evaluation engine that can
 //! parse and execute spreadsheet formulas with cell references,
@@ -92,6 +92,7 @@ mod http;
 mod pivot;
 mod chart_data;
 mod markdown;
+pub mod import;
 
 pub use evaluator::FormulaEvaluator;
 pub use autofill_pattern::AutofillPattern;

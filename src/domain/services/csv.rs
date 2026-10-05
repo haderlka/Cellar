@@ -77,62 +77,15 @@ impl CsvExporter {
     /// let _ = CsvExporter::import_from_csv("data.csv");
     /// ```
     pub fn import_from_csv(filename: &str) -> Result<Spreadsheet, String> {
-        // Read into memory so we can strip the BOM before parsing. CSVs
-        // exported by Excel always begin with U+FEFF; without this the
-        // first cell becomes `"\u{feff}Name"` and header matching breaks.
-        let mut bytes = std::fs::read(filename)
+        // Decoding handles the BOM Excel writes (otherwise the first cell
+        // becomes `"\u{feff}Name"`), UTF-16 and Windows-1252 files; the
+        // separator is detected so semicolon CSVs from European Excel and
+        // tab-separated text work too. Values stay text, never formulas:
+        // see `services::import`.
+        let bytes = std::fs::read(filename)
             .map_err(|e| format!("Failed to open file: {}", e))?;
-        if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            bytes.drain(..3);
-        }
-        let mut reader = ::csv::ReaderBuilder::new()
-            .has_headers(false)
-            .flexible(true)
-            .from_reader(std::io::Cursor::new(bytes));
-
-        let mut spreadsheet = Spreadsheet::default();
-        let mut max_row = 0;
-        let mut max_col = 0;
-
-        // Buffer all writes, then commit them in a single set_many call.
-        // Per-row `set_cell` previously triggered a full dep-graph recalc
-        // for each cell — O(N²) on a typical sparse import. Bulk insert
-        // skips the per-cell recalc and we run a single rebuild at the end.
-        let mut buffered: Vec<(usize, usize, crate::domain::models::CellData)> = Vec::new();
-        for (row_index, result) in reader.records().enumerate() {
-            let record = result.map_err(|e| format!("Failed to read CSV row {}: {}", row_index + 1, e))?;
-
-            for (col_index, field) in record.iter().enumerate() {
-                if !field.is_empty() {
-                    // Untrusted CSVs are common (downloads, shared sheets).
-                    // Don't auto-promote leading-`=` text to a Cellar formula
-                    // — that's a CSV-injection vector (the cell could call
-                    // GET() or other side-effecting functions on load).
-                    // The user can manually convert via the formula bar if
-                    // they actually want a formula.
-                    buffered.push((row_index, col_index, crate::domain::models::CellData {
-                        value: field.to_string(),
-                        formula: None,
-                        format: None,
-                        comment: None,
-                        spill_anchor: None,
-                    }));
-                    max_col = max_col.max(col_index);
-                }
-            }
-            max_row = max_row.max(row_index);
-        }
-
-        if max_row > 0 || max_col > 0 {
-            spreadsheet.rows = spreadsheet.rows.max(max_row + 5);
-            spreadsheet.cols = spreadsheet.cols.max(max_col + 5);
-        }
-
-        spreadsheet.set_many(buffered);
-        // Dep graph is workbook-level and lazy — the next recalc_via_graph
-        // will rebuild from cells.iter().
-
-        Ok(spreadsheet)
+        let text = super::import::decode_text(&bytes);
+        super::import::parse_delimited(&text, super::import::sniff_delimiter(&text))
     }
 
     /// Append CSV rows beneath the existing data in `dest`, starting one row
@@ -528,7 +481,7 @@ Break""#).expect("Failed to write to temp file");
             }
             Err(err) => {
                 // CSV parser rejected the malformed input
-                assert!(err.contains("Failed to read CSV row"));
+                assert!(err.contains("Failed to read row"));
             }
         }
     }

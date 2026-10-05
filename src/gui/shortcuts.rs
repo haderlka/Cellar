@@ -11,7 +11,6 @@ use eframe::egui::{self, Context, Key, KeyboardShortcut, Modifiers};
 pub enum Action {
     New,
     Open,
-    ImportExcel,
     Save,
     SaveAs,
     Quit,
@@ -81,10 +80,9 @@ fn is_mac(ctx: &Context) -> bool {
 
 impl Action {
     /// Every action, grouped the way the menus are.
-    pub const ALL: [Action; 55] = [
+    pub const ALL: [Action; 54] = [
         Action::New,
         Action::Open,
-        Action::ImportExcel,
         Action::Save,
         Action::SaveAs,
         Action::Quit,
@@ -143,7 +141,6 @@ impl Action {
         match self {
             Action::New => "New",
             Action::Open => "Open…",
-            Action::ImportExcel => "Import Excel workbook…",
             Action::Save => "Save",
             Action::SaveAs => "Save As…",
             Action::Quit => "Quit",

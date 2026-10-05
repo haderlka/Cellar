@@ -80,7 +80,7 @@ workbook in a `.cellar` file:
   × values the series, and the chart follows the pivot's fields and filters.
 
 **Excel**
-- *File → Import Excel workbook…* brings over values, formulas, sheets,
+- *File → Import → Excel workbook…* brings over values, formulas, sheets,
   named ranges, number formats, bold/underline, colours, column widths,
   charts, PivotTables (as live PivotTables) and PivotCharts.
 - Every formula is then recalculated by Cellar and compared with the value
@@ -88,6 +88,22 @@ workbook in a `.cellar` file:
   function Cellar doesn't support) so you know which cells to check.
 - *File → Export → Excel workbook (.xlsx)* writes values, formulas and
   formatting back out.
+
+**Imports** — *File → Import* (or just *File → Open*):
+
+| Format | Extensions | What comes in |
+|---|---|---|
+| Excel workbook | `.xlsx` `.xlsm` | values, formulas, formatting, charts, PivotTables |
+| Excel binary / 97–2003 | `.xlsb` `.xls` | values and formulas |
+| OpenDocument (LibreOffice, Google Sheets download) | `.ods` | values and formulas |
+| CSV / delimited text | `.csv` `.txt` | separator detected: `,` `;` tab or `\|` |
+| Tab-separated | `.tsv` `.tab` | |
+| Markdown tables | `.md` | one sheet per table, named after the heading above it |
+| JSON | `.json` | array of records or rows; an object of arrays → one sheet per key |
+| JSON Lines | `.jsonl` `.ndjson` | one record per line |
+
+Text files may be UTF-8, UTF-16 (Excel's "Unicode Text") or Windows-1252.
+Values from text formats are imported as values, never as formulas.
 
 **Exports**
 - Markdown tables of the computed values (current sheet, all sheets, or
@@ -118,7 +134,7 @@ Platform notes:
 
 ### Moving from Excel
 
-1. *File → Import Excel workbook…* and pick the `.xlsx` file.
+1. *File → Import → Excel workbook…* and pick the `.xlsx` file.
 2. Read the import report: it lists formulas that compute differently and
    PivotTables that were converted.
 3. *File → Save As…* to write the `.cellar` file, and commit it to git.
@@ -165,6 +181,7 @@ The same executable converts and exports without opening a window:
 
 ```bash
 cellar --convert Budget.xlsx                  # writes Budget.cellar, prints the report
+cellar --convert data.csv                     # any importable format works
 cellar --export-md Budget.cellar              # writes Budget.md (all sheets)
 cellar --export-charts Budget.cellar          # PNGs into "Budget charts/"
 cellar --export-charts Budget.xlsx out --svg  # SVGs; works on .xlsx too

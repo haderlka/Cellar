@@ -79,7 +79,8 @@ impl ConversionReport {
     }
 }
 
-/// Read an `.xlsx` file into a fully formatted, recalculated workbook.
+/// Read a spreadsheet file (.xlsx, .xlsm, .xlsb, .xls, .ods) into a recalculated
+/// workbook; formatting, charts and PivotTables come from .xlsx/.xlsm only.
 pub fn convert_xlsx(path: &str) -> Result<(Workbook, ConversionReport), String> {
     // The readers (calamine and our XML parsing) see untrusted input; some
     // malformed files make calamine panic (e.g. overflowing cell
@@ -92,7 +93,20 @@ fn convert_xlsx_unguarded(path: &str) -> Result<(Workbook, ConversionReport), St
     let mut wb = super::xlsx::load_xlsx(path)?;
     let mut report = ConversionReport { source: path.to_string(), ..Default::default() };
 
-    match super::xlsx_extras::read_extras(path) {
+    // Formatting, charts and PivotTables are read from the Office Open XML
+    // parts; .xls, .xlsb and .ods bring values and formulas only.
+    let is_ooxml = [".xlsx", ".xlsm"].iter().any(|ext| path.to_lowercase().ends_with(ext));
+    let extras = if is_ooxml {
+        super::xlsx_extras::read_extras(path)
+    } else {
+        report.warnings.push(
+            "Values and formulas were imported; formatting, charts and PivotTables are only \
+             read from .xlsx files."
+                .to_string(),
+        );
+        Ok(HashMap::new())
+    };
+    match extras {
         Ok(mut extras) => {
             for (idx, name) in wb.sheet_names.clone().iter().enumerate() {
                 let Some(ex) = extras.remove(name) else { continue };

@@ -13,7 +13,8 @@ use cellar::domain::{
     range_to_markdown, sheet_to_markdown, workbook_to_markdown, CsvExporter, NumberFormat, Spreadsheet,
     TerminalColor, Workbook,
 };
-use cellar::infrastructure::{recent, xlsx, xlsx_convert, FileRepository};
+use cellar::infrastructure::import::{self, ImportFormat};
+use cellar::infrastructure::{recent, xlsx, FileRepository};
 
 use crate::dialogs::Dialogs;
 use crate::shortcuts::Action;
@@ -42,7 +43,8 @@ pub enum Guarded {
     Open,
     /// Reopen a file from File → Open Recent.
     OpenPath(PathBuf),
-    ImportExcel,
+    /// File → Import → a format.
+    Import(ImportFormat),
     Quit,
 }
 
@@ -56,7 +58,7 @@ pub struct GuiApp {
     /// A Delete clicked on a sidebar card, applied once the sidebar is drawn.
     pub sidebar_delete: Option<crate::sidebar::SidebarDelete>,
     /// Suggested path for the first "Save" after importing a non-.cellar
-    /// file (xlsx/csv): same folder, same name, `.cellar` extension.
+    /// file (Excel, CSV, …): same folder, same name, `.cellar` extension.
     pub suggested_save: Option<PathBuf>,
     name_box: String,
     name_box_editing: bool,
@@ -105,17 +107,9 @@ impl GuiApp {
             recent::remove(&p);
             return;
         }
-        match extension(&path).as_str() {
-            "xlsx" | "xlsm" => self.import_excel(path),
-            "csv" | "tsv" | "txt" => match CsvExporter::import_from_csv(&p) {
-                Ok(sheet) => {
-                    let mut wb = Workbook::from_spreadsheet(sheet);
-                    wb.build_dep_graph_from_scratch();
-                    self.load_foreign(wb, &path);
-                }
-                Err(e) => self.app.status_message = Some(format!("Could not open {}: {}", p, e)),
-            },
-            _ => {
+        match ImportFormat::from_path(&path) {
+            Some(format) => self.import(path, format),
+            None => {
                 let result = FileRepository::load_workbook(&p);
                 if let Err(e) = &result {
                     self.app.status_message = Some(format!("Could not open {}: {}", p, e));
@@ -138,18 +132,20 @@ impl GuiApp {
         self.suggested_save = Some(source.with_extension("cellar"));
     }
 
-    pub fn import_excel(&mut self, path: PathBuf) {
-        let p = path.to_string_lossy().to_string();
-        match xlsx_convert::convert_xlsx(&p) {
-            Ok((wb, report)) => {
-                self.load_foreign(wb, &path);
+    /// Open a file saved by another program (see File → Import).
+    pub fn import(&mut self, path: PathBuf, format: ImportFormat) {
+        match import::import_file(&path, format) {
+            Ok(imported) => {
+                self.load_foreign(imported.workbook, &path);
                 self.app.status_message = Some(format!(
                     "Imported {} — save it as .cellar to keep working in text format",
                     file_name(&path)
                 ));
-                self.dialogs.import_report = Some(report);
+                self.dialogs.import_report = imported.report;
             }
-            Err(e) => self.app.status_message = Some(format!("Excel import failed: {}", e)),
+            Err(e) => {
+                self.app.status_message = Some(format!("Could not import {}: {}", file_name(&path), e))
+            }
         }
     }
 
@@ -298,23 +294,24 @@ impl GuiApp {
                 self.suggested_save = None;
             }
             Guarded::Open => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Spreadsheets", &["cellar", "xlsx", "xlsm", "csv"])
-                    .add_filter("Cellar workbook", &["cellar"])
-                    .add_filter("Excel workbook", &["xlsx", "xlsm"])
-                    .add_filter("CSV", &["csv"])
-                    .pick_file()
-                {
+                let mut all = vec!["cellar"];
+                all.extend(ImportFormat::all_extensions());
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("All supported files", &all)
+                    .add_filter("Cellar workbook", &["cellar"]);
+                for format in ImportFormat::ALL {
+                    dialog = dialog.add_filter(format.name(), format.extensions());
+                }
+                if let Some(path) = dialog.pick_file() {
                     self.open_path(path);
                 }
             }
             Guarded::OpenPath(path) => self.open_path(path),
-            Guarded::ImportExcel => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Excel workbook", &["xlsx", "xlsm"])
-                    .pick_file()
+            Guarded::Import(format) => {
+                if let Some(path) =
+                    rfd::FileDialog::new().add_filter(format.name(), format.extensions()).pick_file()
                 {
-                    self.import_excel(path);
+                    self.import(path, format);
                 }
             }
             Guarded::Quit => {
@@ -647,7 +644,19 @@ impl GuiApp {
                         }
                     }
                 });
-                self.menu_item(ui, ctx, Action::ImportExcel);
+                ui.menu_button("Import", |ui| {
+                    for format in ImportFormat::ALL {
+                        // Separators between spreadsheets, delimited text
+                        // and structured text, like the Export menu.
+                        if matches!(format, ImportFormat::Csv | ImportFormat::Markdown) {
+                            ui.separator();
+                        }
+                        if ui.button(format!("{}…", format.label())).clicked() {
+                            self.guarded(ctx, Guarded::Import(format));
+                            ui.close();
+                        }
+                    }
+                });
                 ui.separator();
                 self.menu_item(ui, ctx, Action::Save);
                 self.menu_item(ui, ctx, Action::SaveAs);
@@ -790,7 +799,6 @@ impl GuiApp {
         match action {
             Action::New => self.guarded(ctx, Guarded::New),
             Action::Open => self.guarded(ctx, Guarded::Open),
-            Action::ImportExcel => self.guarded(ctx, Guarded::ImportExcel),
             Action::Save => self.save(),
             Action::SaveAs => self.save_as(),
             Action::Quit => self.guarded(ctx, Guarded::Quit),

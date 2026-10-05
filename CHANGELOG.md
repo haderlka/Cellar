@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **File → Import** submenu, next to Export, for every format Cellar can
+  read. New formats: Excel `.xlsb` and `.xls`, OpenDocument `.ods`
+  (formulas are translated from OpenFormula), tab-separated `.tsv`/`.tab`,
+  Markdown tables (`.md`, round-trips File → Export → Markdown), JSON and
+  JSON Lines. File → Open, double-click and `cellar --convert` accept them
+  all.
+
+### Changed
+
+- **CSV import** detects the separator (`,` `;` tab `|`), so semicolon
+  CSVs from European Excel no longer land in one column, and reads
+  UTF-16 and Windows-1252 files instead of failing on them.
+- **`.tsv` files** were split on commas; they are now split on tabs.
+- File → Import Excel workbook… moved to File → Import → Excel workbook….
+
 ## Cellar 0.1.1 — 2026-10-04
 
 Bug-fix release: crashes, freezes and data loss found by reviewing and

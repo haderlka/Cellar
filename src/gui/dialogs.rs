@@ -149,7 +149,7 @@ impl GuiApp {
         let mut save = false;
         let mut jump: Option<(usize, String)> = None;
         let total = report.total_mismatches();
-        egui::Window::new("Excel import")
+        egui::Window::new("Import report")
             .open(&mut open)
             .collapsible(false)
             .default_width(620.0)

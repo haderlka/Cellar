@@ -45,15 +45,15 @@ pub fn load_xlsx(path: &str) -> Result<Workbook, String> {
     if let Ok(meta) = std::fs::metadata(path)
         && meta.len() > MAX_XLSX_FILE_BYTES {
             return Err(format!(
-                "xlsx too large: {} bytes (limit {})",
+                "file too large: {} bytes (limit {})",
                 meta.len(),
                 MAX_XLSX_FILE_BYTES
             ));
         }
-    let mut wb = open_workbook_auto(path).map_err(|e| format!("xlsx open: {}", e))?;
+    let mut wb = open_workbook_auto(path).map_err(|e| e.to_string())?;
     let sheet_names = wb.sheet_names().to_vec();
     if sheet_names.is_empty() {
-        return Err("xlsx has no sheets".to_string());
+        return Err("the workbook has no sheets".to_string());
     }
     let sheet_count = sheet_names.len() as u32;
     let mut out = Workbook {
@@ -128,7 +128,7 @@ pub fn load_xlsx(path: &str) -> Result<Workbook, String> {
             // modern function names (XLOOKUP, FILTER, etc.) so the
             // formula evaluator recognizes them.
             let formula = formula_map.get(&(abs_r, abs_c)).map(|f| {
-                let cleaned = strip_xlfn_prefixes(f);
+                let cleaned = strip_xlfn_prefixes(&odf_formula_to_excel(f));
                 format!("={}", cleaned)
             });
             let cd = CellData {
@@ -158,6 +158,81 @@ pub fn load_xlsx(path: &str) -> Result<Workbook, String> {
     // recalc_via_graph would otherwise run on the first edit.
     out.build_dep_graph_from_scratch();
     Ok(out)
+}
+
+/// OpenDocument (.ods) formulas arrive as OpenFormula text:
+/// `of:=SUM([.A1:.B2];[$Sheet2.C3])`. Rewrite them in Excel syntax without
+/// the leading `=`: `SUM(A1:B2,Sheet2!C3)`. Excel formulas pass through.
+fn odf_formula_to_excel(formula: &str) -> String {
+    let body = formula.strip_prefix("of:").unwrap_or(formula);
+    let Some(body) = body.strip_prefix('=') else {
+        return formula.to_string();
+    };
+    // `[Sheet.A1]` → `Sheet!A1`; the sheet may be `$`-anchored or quoted.
+    fn reference(r: &str, sheet_so_far: &mut Option<String>) -> String {
+        let mut in_quote = false;
+        let mut dot = None;
+        for (i, ch) in r.char_indices() {
+            match ch {
+                '\'' => in_quote = !in_quote,
+                '.' if !in_quote => dot = Some(i),
+                _ => {}
+            }
+        }
+        let (sheet, cell) = match dot {
+            Some(i) => (r[..i].trim_start_matches('$'), &r[i + 1..]),
+            None => ("", r),
+        };
+        if sheet.is_empty() || sheet_so_far.as_deref() == Some(sheet) {
+            cell.to_string()
+        } else {
+            *sheet_so_far = Some(sheet.to_string());
+            format!("{}!{}", sheet, cell)
+        }
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars().peekable();
+    let mut in_string = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                in_string = !in_string;
+                out.push(ch);
+            }
+            _ if in_string => out.push(ch),
+            ';' => out.push(','),
+            '[' => {
+                let mut inner = String::new();
+                let mut in_quote = false;
+                for c in chars.by_ref() {
+                    match c {
+                        '\'' => in_quote = !in_quote,
+                        ']' if !in_quote => break,
+                        _ => {}
+                    }
+                    inner.push(c);
+                }
+                let mut sheet = None;
+                let mut parts = Vec::new();
+                let mut start = 0;
+                let mut q = false;
+                for (i, c) in inner.char_indices() {
+                    match c {
+                        '\'' => q = !q,
+                        ':' if !q => {
+                            parts.push(reference(&inner[start..i], &mut sheet));
+                            start = i + 1;
+                        }
+                        _ => {}
+                    }
+                }
+                parts.push(reference(&inner[start..], &mut sheet));
+                out.push_str(&parts.join(":"));
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Strip Excel's `_xlfn.` and `_xlfn._xlws.` prefixes from function names.
@@ -192,7 +267,16 @@ fn strip_xlfn_prefixes(formula: &str) -> String {
 
 #[cfg(test)]
 mod xlfn_tests {
-    use super::strip_xlfn_prefixes;
+    use super::{odf_formula_to_excel, strip_xlfn_prefixes};
+
+    #[test]
+    fn converts_openformula() {
+        assert_eq!(odf_formula_to_excel("of:=SUM([.A1:.B2];[$Sheet2.C3])"), "SUM(A1:B2,Sheet2!C3)");
+        assert_eq!(odf_formula_to_excel("of:=['My Sheet'.$A$1:'My Sheet'.B2]*2"), "'My Sheet'!$A$1:B2*2");
+        assert_eq!(odf_formula_to_excel("of:=IF([.A1]>0;\"a;b\";\"[x]\")"), "IF(A1>0,\"a;b\",\"[x]\")");
+        // Excel formulas (no `of:` / `=` prefix) are untouched.
+        assert_eq!(odf_formula_to_excel("SUM(A1:A3)"), "SUM(A1:A3)");
+    }
 
     #[test]
     fn strips_lower_and_upper() {
