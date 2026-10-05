@@ -1,9 +1,22 @@
 # Changelog
 
-## Unreleased
+## Cellar 0.1.2 — 2026-10-05
+
+New file imports, PivotTable results in formulas, and picking cells on
+other sheets while typing a formula. Files from 0.1.1 open unchanged.
 
 ### Added
 
+- **`GETPIVOTDATA`** reads a value from a PivotTable, as in Excel:
+  `=GETPIVOTDATA("Sum of Revenue", "PivotTable1", "Region", "East")`.
+  The PivotTable is given by name (`"Sheet2!PivotTable1"` for another
+  sheet's). Results follow changes to the data and to the PivotTable;
+  values the PivotTable doesn't show are `#REF!`.
+- **Click a PivotTable value while typing a formula** to insert its
+  `GETPIVOTDATA` call; right-click a value to copy the formula.
+- **Pick cells on other sheets while typing a formula**: click another
+  sheet's tab, then click or drag cells to insert `Sheet2!B4` references.
+  Enter returns to the formula's cell, Esc cancels.
 - **File → Import** submenu, next to Export, for every format Cellar can
   read. New formats: Excel `.xlsb` and `.xls`, OpenDocument `.ods`
   (formulas are translated from OpenFormula), tab-separated `.tsv`/`.tab`,
@@ -18,6 +31,15 @@
   UTF-16 and Windows-1252 files instead of failing on them.
 - **`.tsv` files** were split on commas; they are now split on tabs.
 - File → Import Excel workbook… moved to File → Import → Excel workbook….
+- **Renaming a PivotTable** updates the `GETPIVOTDATA` formulas that use
+  it. Formulas on other sheets get the sheet in the name
+  (`"Sheet1!Sales"`) so a same-named PivotTable can't take them over.
+- **PivotTable names** must differ by more than upper/lower case.
+
+### Fixed
+
+- **Renaming a sheet** broke PivotTables and charts whose data range was
+  on that sheet; their ranges are now renamed too.
 
 ## Cellar 0.1.1 — 2026-10-04
 
