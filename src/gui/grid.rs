@@ -567,10 +567,11 @@ impl GuiApp {
 
     fn on_press(&mut self, hit: Hit, shift: bool, layout: &Layout) {
         // While typing a formula, clicking a cell inserts its reference.
-        let picking_ref = self
-            .edit
-            .as_ref()
-            .is_some_and(|e| e.text.starts_with('=') && !matches!(hit, Hit::Cell(r, c) if (r, c) == (e.row, e.col)));
+        let active = self.app.workbook.active_sheet;
+        let picking_ref = self.edit.as_ref().is_some_and(|e| {
+            e.text.starts_with('=')
+                && !matches!(hit, Hit::Cell(r, c) if (active, r, c) == (e.sheet, e.row, e.col))
+        });
         if picking_ref && let Hit::Cell(r, c) = hit {
             self.grid.drag = Some(Drag::RefPick { anchor: (r, c), current: (r, c) });
             return;
@@ -726,28 +727,44 @@ impl GuiApp {
                     (anchor.0.max(current.0), anchor.1.max(current.1)),
                 );
                 let reference = if a == b { label(a) } else { format!("{}:{}", label(a), label(b)) };
-                if let Some(edit) = &mut self.edit {
-                    // A second click right after the first replaces the
-                    // reference instead of appending ("=A1" → "=B2").
-                    if let Some(start) = edit.ref_start
-                        && start <= edit.text.len()
-                    {
-                        edit.text.truncate(start);
-                    } else if edit.text.ends_with(|ch: char| ch.is_ascii_alphanumeric() || ch == ')') {
-                        edit.text.push('+');
-                    }
-                    edit.ref_start = Some(edit.text.len());
-                    edit.text.push_str(&reference);
-                    edit.focus_pending = true;
-                }
+                let prefix = self.reference_sheet_prefix().unwrap_or_default();
+                self.insert_reference(&format!("{}{}", prefix, reference));
             }
             _ => {}
         }
     }
 
+    /// `Sheet2!` when the formula being typed belongs to another sheet than
+    /// the one shown, so references clicked here name their sheet.
+    pub fn reference_sheet_prefix(&self) -> Option<String> {
+        let edit = self.edit.as_ref()?;
+        let wb = &self.app.workbook;
+        (edit.sheet != wb.active_sheet)
+            .then(|| format!("{}!", cellar::domain::format_sheet_name(&wb.sheet_names[wb.active_sheet])))
+    }
+
+    /// Point mode: put a clicked reference (a cell, a range, or a
+    /// PivotTable value's GETPIVOTDATA call) into the formula being typed.
+    pub fn insert_reference(&mut self, reference: &str) {
+        let Some(edit) = &mut self.edit else { return };
+        // A second click right after the first replaces the reference
+        // instead of appending ("=A1" → "=B2").
+        if let Some(start) = edit.ref_start
+            && start <= edit.text.len()
+        {
+            edit.text.truncate(start);
+        } else if edit.text.ends_with(|ch: char| ch.is_ascii_alphanumeric() || ch == ')') {
+            edit.text.push('+');
+        }
+        edit.ref_start = Some(edit.text.len());
+        edit.text.push_str(reference);
+        edit.focus_pending = true;
+    }
+
     fn cell_editor(&mut self, ui: &mut Ui, layout: &Layout, cell_rect: &dyn Fn(usize, usize) -> Rect, screen: Rect) {
         let Some(edit) = &mut self.edit else { return };
-        if !edit.in_cell {
+        // On another sheet (picking references there) the formula bar edits.
+        if !edit.in_cell || edit.sheet != self.app.workbook.active_sheet {
             return;
         }
         let Some(idx) = layout.index_of(edit.row) else { return };

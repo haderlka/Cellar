@@ -25,6 +25,9 @@ pub const FORMULA_BAR_ID: &str = "formula_bar";
 /// An in-progress cell edit. The text is shared by the in-cell editor and
 /// the formula bar; `in_cell` says which one has the caret.
 pub struct Edit {
+    /// The sheet the edited cell is on. While typing a formula the user can
+    /// show other sheets to click references there.
+    pub sheet: usize,
     pub row: usize,
     pub col: usize,
     pub text: String,
@@ -340,7 +343,8 @@ impl GuiApp {
             return;
         }
         let text = initial.unwrap_or_else(|| self.cell_input_text(row, col));
-        self.edit = Some(Edit { row, col, text, in_cell, focus_pending: true, ref_start: None });
+        let sheet = self.app.workbook.active_sheet;
+        self.edit = Some(Edit { sheet, row, col, text, in_cell, focus_pending: true, ref_start: None });
         self.grid.scroll_to_cursor = true;
     }
 
@@ -348,6 +352,8 @@ impl GuiApp {
     /// evaluation, cycle checks, undo) and move the cursor.
     pub fn commit_edit(&mut self, mv: EditMove) {
         let Some(edit) = self.edit.take() else { return };
+        // A formula picked across sheets is entered on its own sheet.
+        self.show_sheet(edit.sheet);
         self.app.clear_selection();
         self.app.selected_row = edit.row;
         self.app.selected_col = edit.col;
@@ -370,7 +376,20 @@ impl GuiApp {
     }
 
     pub fn cancel_edit(&mut self) {
-        self.edit = None;
+        if let Some(edit) = self.edit.take() {
+            self.show_sheet(edit.sheet);
+        }
+    }
+
+    /// Show sheet `idx`, keeping each sheet's cursor and scroll position.
+    fn show_sheet(&mut self, idx: usize) {
+        if idx == self.app.workbook.active_sheet || idx >= self.app.workbook.sheets.len() {
+            return;
+        }
+        self.app.snapshot_view_state_to_active_sheet();
+        self.app.switch_to_sheet(idx);
+        self.app.restore_view_state_from_active_sheet();
+        self.grid = GridState::default();
     }
 
     pub fn run_command(&mut self, cmd: &str) {
@@ -564,7 +583,8 @@ impl GuiApp {
                 m.surrender_focus(egui::Id::new(FORMULA_BAR_ID));
                 m.surrender_focus(egui::Id::new(crate::grid::CELL_EDITOR_ID));
             });
-            let range = self.app.get_selection_range();
+            let home = self.edit.as_ref().is_some_and(|e| e.sheet == self.app.workbook.active_sheet);
+            let range = self.app.get_selection_range().filter(|_| home);
             let at = self.edit.as_ref().map(|e| (e.row, e.col));
             self.commit_edit(EditMove::Stay);
             if let (Some(range), Some(at)) = (range, at) {
@@ -1147,6 +1167,7 @@ impl GuiApp {
                     Some(e) => e.in_cell = false,
                     None => {
                         self.edit = Some(Edit {
+                            sheet: self.app.workbook.active_sheet,
                             row,
                             col,
                             text: shown.clone(),
@@ -1207,11 +1228,18 @@ impl GuiApp {
             for (idx, name) in self.app.workbook.sheet_names.clone().iter().enumerate() {
                 let tab = ui.selectable_label(idx == active, format!("  {}  ", name));
                 if tab.clicked() && idx != active {
-                    self.commit_edit(EditMove::Stay);
-                    self.app.snapshot_view_state_to_active_sheet();
-                    self.app.switch_to_sheet(idx);
-                    self.app.restore_view_state_from_active_sheet();
-                    self.grid = GridState::default();
+                    match &mut self.edit {
+                        // Typing a formula: show the sheet to click references
+                        // on it (Excel's point mode); the formula bar keeps
+                        // the text.
+                        Some(e) if e.text.starts_with('=') => {
+                            e.in_cell = false;
+                            e.focus_pending = true;
+                            e.ref_start = None;
+                        }
+                        _ => self.commit_edit(EditMove::Stay),
+                    }
+                    self.show_sheet(idx);
                 }
                 if tab.double_clicked() {
                     self.dialogs.open_rename(&self.app);

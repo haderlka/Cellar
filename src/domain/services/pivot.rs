@@ -10,8 +10,8 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use crate::domain::models::{
-    format_cell_value, CellFormat, NumberFormat, PivotLayout, PivotSort, PivotSpec, ShowValuesAs,
-    Spreadsheet, Summarize, Workbook, BLANK_ITEM,
+    format_cell_value, CellFormat, NumberFormat, PivotField, PivotLayout, PivotSort, PivotSpec,
+    ShowValuesAs, Spreadsheet, Summarize, Workbook, BLANK_ITEM,
 };
 
 /// Records of a pivot's source range: header names plus data rows.
@@ -26,27 +26,27 @@ impl PivotData {
     /// `host`. Fully blank rows are skipped; blank headers become
     /// "Column X" so every field has a name.
     pub fn read(wb: &Workbook, host: usize, source: &str) -> Result<Self, String> {
-        let (sheet_idx, range) = match source.rsplit_once('!') {
-            Some((name, range)) => {
-                let name = name.trim().trim_matches('\'').replace("''", "'");
+        let sheet = wb.sheets.get(host).ok_or("Source sheet missing")?;
+        Self::read_on(Some(wb), sheet, source)
+    }
+
+    /// Like [`read`](Self::read) with the host sheet given directly. A
+    /// sheet-qualified source needs `wb`.
+    pub fn read_on(wb: Option<&Workbook>, host: &Spreadsheet, source: &str) -> Result<Self, String> {
+        let src = SourceRange::parse(source)?;
+        let sheet = match &src.sheet {
+            Some(name) => {
+                let wb = wb.ok_or_else(|| format!("Sheet '{}' not found", name))?;
                 let idx = wb
                     .sheet_names
                     .iter()
-                    .position(|n| n.eq_ignore_ascii_case(&name))
+                    .position(|n| n.eq_ignore_ascii_case(name))
                     .ok_or_else(|| format!("Sheet '{}' not found", name))?;
-                (idx, range)
+                wb.sheets.get(idx).ok_or("Source sheet missing")?
             }
-            None => (host, source),
+            None => host,
         };
-        let range = range.trim().replace('$', "").to_uppercase();
-        let (a, b) = range.split_once(':').ok_or("The source must be a range like A1:D20")?;
-        let (Some((r0, c0)), Some((r1, c1))) =
-            (Spreadsheet::parse_cell_reference(a), Spreadsheet::parse_cell_reference(b))
-        else {
-            return Err(format!("Invalid source range '{}'", source));
-        };
-        let (r0, r1, c0, c1) = (r0.min(r1), r0.max(r1), c0.min(c1), c0.max(c1));
-        let sheet = wb.sheets.get(sheet_idx).ok_or("Source sheet missing")?;
+        let ((r0, c0), (r1, c1)) = (src.start, src.end);
         let (last_r, last_c) = sheet.last_cell();
         let (r1, c1) = (r1.min(last_r.max(r0)), c1.min(last_c.max(c0)));
         let value = |r: usize, c: usize| sheet.cells.get(&(r, c)).map(|cd| cd.value.clone()).unwrap_or_default();
@@ -102,6 +102,31 @@ impl PivotData {
             any = true;
         }
         any
+    }
+}
+
+/// A pivot's source range, parsed: optional sheet name plus the corners.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceRange {
+    pub sheet: Option<String>,
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+}
+
+impl SourceRange {
+    pub fn parse(source: &str) -> Result<Self, String> {
+        let (sheet, range) = match source.rsplit_once('!') {
+            Some((name, range)) => (Some(name.trim().trim_matches('\'').replace("''", "'")), range),
+            None => (None, source),
+        };
+        let range = range.trim().replace('$', "").to_uppercase();
+        let (a, b) = range.split_once(':').ok_or("The source must be a range like A1:D20")?;
+        let (Some((r0, c0)), Some((r1, c1))) =
+            (Spreadsheet::parse_cell_reference(a), Spreadsheet::parse_cell_reference(b))
+        else {
+            return Err(format!("Invalid source range '{}'", source));
+        };
+        Ok(Self { sheet, start: (r0.min(r1), c0.min(c1)), end: (r0.max(r1), c0.max(c1)) })
     }
 }
 
@@ -237,11 +262,13 @@ pub struct PivotCell {
     pub indent: u8,
     /// Numeric result, for right-alignment.
     pub number: Option<f64>,
+    /// For value cells: how GETPIVOTDATA addresses the cell.
+    pub reference: Option<PivotRef>,
 }
 
 impl PivotCell {
     fn text(text: impl Into<String>, kind: PivotCellKind) -> Self {
-        Self { text: text.into(), kind, indent: 0, number: None }
+        Self { text: text.into(), kind, indent: 0, number: None, reference: None }
     }
     fn blank() -> Self {
         Self::text("", PivotCellKind::Blank)
@@ -408,9 +435,14 @@ impl Engine<'_> {
     }
 }
 
-/// Compute a pivot's output. Errors are user-facing messages (bad range,
-/// missing field).
-pub fn compute_pivot(spec: &PivotSpec, data: &PivotData) -> Result<PivotOutput, String> {
+/// The aggregation plus the row and column lines it is shown on.
+struct Prepared<'a> {
+    engine: Engine<'a>,
+    row_slots: Vec<Slot>,
+    col_slots: Vec<Slot>,
+}
+
+fn prepare<'a>(spec: &'a PivotSpec, data: &PivotData) -> Result<Prepared<'a>, String> {
     let idx = |name: &str| data.field_index(name).ok_or_else(|| format!("Field '{}' is not in the source data", name));
     let filter_idx = spec
         .filters
@@ -453,6 +485,15 @@ pub fn compute_pivot(spec: &PivotSpec, data: &PivotData) -> Result<PivotOutput, 
     let opts = &spec.options;
     let row_slots = axis_slots(&engine.row_children, &spec.rows.iter().map(|f| f.subtotals).collect::<Vec<_>>(), nr, true, opts.layout, opts.subtotals_at_top, opts.grand_totals_columns);
     let col_slots = axis_slots(&engine.col_children, &spec.columns.iter().map(|f| f.subtotals).collect::<Vec<_>>(), nc, false, PivotLayout::Tabular, false, opts.grand_totals_rows);
+    Ok(Prepared { engine, row_slots, col_slots })
+}
+
+/// Compute a pivot's output. Errors are user-facing messages (bad range,
+/// missing field).
+pub fn compute_pivot(spec: &PivotSpec, data: &PivotData) -> Result<PivotOutput, String> {
+    let Prepared { engine, row_slots, col_slots } = prepare(spec, data)?;
+    let (nr, nc, nv) = (spec.rows.len(), spec.columns.len(), spec.values.len());
+    let opts = &spec.options;
 
     // Expand Σ Values onto its axis.
     let values_on_rows = opts.values_on_rows && nv > 1;
@@ -567,7 +608,7 @@ pub fn compute_pivot(spec: &PivotSpec, data: &PivotData) -> Result<PivotOutput, 
                     // Value-name line under its item.
                     let col = if compact { 0 } else { label_cols - 1 };
                     let name = if matches!(slot, Slot::Grand) { format!("Total {}", value_caption(v)) } else { value_caption(v) };
-                    row[col] = PivotCell { text: name, kind, indent: if compact { depth as u8 + 1 } else { 0 }, number: None };
+                    row[col] = PivotCell { text: name, kind, indent: if compact { depth as u8 + 1 } else { 0 }, number: None, reference: None };
                 } else {
                     match slot {
                         Slot::Grand => {
@@ -582,11 +623,12 @@ pub fn compute_pivot(spec: &PivotSpec, data: &PivotData) -> Result<PivotOutput, 
                                 kind,
                                 indent: if compact { depth as u8 } else { 0 },
                                 number: None,
+                                reference: None,
                             };
                         }
                         Slot::Item { path, .. } => {
                             if compact {
-                                row[0] = PivotCell { text: path[depth].clone(), kind, indent: depth as u8, number: None };
+                                row[0] = PivotCell { text: path[depth].clone(), kind, indent: depth as u8, number: None, reference: None };
                             } else if opts.layout == PivotLayout::Outline {
                                 row[depth] = PivotCell::text(path[depth].clone(), kind);
                                 if opts.repeat_item_labels {
@@ -620,7 +662,13 @@ pub fn compute_pivot(spec: &PivotSpec, data: &PivotData) -> Result<PivotOutput, 
                                 _ => PivotCellKind::Value,
                             };
                             match engine.shown(slot.agg_path(), cslot.agg_path(), v) {
-                                Some(x) => PivotCell { text: engine.format(v, x), kind: value_kind, indent: 0, number: Some(x) },
+                                Some(x) => PivotCell {
+                                    text: engine.format(v, x),
+                                    kind: value_kind,
+                                    indent: 0,
+                                    number: Some(x),
+                                    reference: Some(PivotRef::new(spec, v, slot.agg_path(), cslot.agg_path())),
+                                },
                                 None => PivotCell::text(opts.empty_cells.clone(), value_kind),
                             }
                         }
@@ -666,6 +714,299 @@ pub fn compute_pivot(spec: &PivotSpec, data: &PivotData) -> Result<PivotOutput, 
     }
 
     Ok(PivotOutput { table, header_rows, label_cols, chart })
+}
+
+/// A value cell's address in GETPIVOTDATA terms: the value field plus the
+/// row and column items leading to it (none for grand totals).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PivotRef {
+    /// Index into `PivotSpec::values`.
+    pub value: usize,
+    /// (field, item) pairs, row fields first.
+    pub items: Vec<(String, String)>,
+}
+
+impl PivotRef {
+    fn new(spec: &PivotSpec, value: usize, rows: &[String], cols: &[String]) -> Self {
+        let pairs = |fields: &[PivotField], items: &[String]| -> Vec<(String, String)> {
+            fields.iter().zip(items).map(|(f, i)| (f.field.clone(), i.clone())).collect()
+        };
+        let mut items = pairs(&spec.rows, rows);
+        items.extend(pairs(&spec.columns, cols));
+        Self { value, items }
+    }
+
+    /// `GETPIVOTDATA("Sum of Revenue","PivotTable1","Region","East")`,
+    /// without the leading `=`. Numeric items are written as numbers.
+    /// `sheet` names the pivot's sheet for a formula on another sheet
+    /// (`"Sheet2!PivotTable1"`).
+    pub fn formula(&self, spec: &PivotSpec, sheet: Option<&str>) -> String {
+        let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let item = |s: &str| match s.parse::<f64>() {
+            Ok(x) if x.is_finite() && !s.starts_with(['+', '.']) && s.trim() == s => s.to_string(),
+            _ => quote(s),
+        };
+        let mut args = vec![
+            quote(&spec.values.get(self.value).map(|v| v.display_name()).unwrap_or_default()),
+            quote(&match sheet {
+                Some(sheet) => format!("{}!{}", sheet, spec.name),
+                None => spec.name.clone(),
+            }),
+        ];
+        for (field, it) in &self.items {
+            args.push(quote(field));
+            args.push(item(it));
+        }
+        format!("GETPIVOTDATA({})", args.join(","))
+    }
+}
+
+fn item_matches(label: &str, wanted: &str) -> bool {
+    let wanted = wanted.trim();
+    if label.to_lowercase() == wanted.to_lowercase() {
+        return true;
+    }
+    matches!((label.parse::<f64>(), wanted.parse::<f64>()), (Ok(a), Ok(b)) if a == b)
+}
+
+/// GETPIVOTDATA: the value `data_field` (its name, e.g. "Sum of Revenue",
+/// or its source field) shows where the row and column items in `items`
+/// meet. Fields left out mean their total. As in Excel, only values the
+/// PivotTable shows can be retrieved: a hidden item, a subtotal or grand
+/// total that is switched off, or an empty cell is an error.
+pub fn get_pivot_data(
+    spec: &PivotSpec,
+    data: &PivotData,
+    data_field: &str,
+    items: &[(String, String)],
+) -> Result<f64, String> {
+    let data_field = data_field.trim();
+    let v = spec
+        .values
+        .iter()
+        .position(|pv| pv.display_name().eq_ignore_ascii_case(data_field))
+        .or_else(|| spec.values.iter().position(|pv| pv.field.eq_ignore_ascii_case(data_field)))
+        .ok_or_else(|| format!("'{}' is not a value field of {}", data_field, spec.name))?;
+    let mut row_want: Vec<Option<&str>> = vec![None; spec.rows.len()];
+    let mut col_want: Vec<Option<&str>> = vec![None; spec.columns.len()];
+    for (field, item) in items {
+        let find = |axis: &[PivotField]| axis.iter().position(|f| f.field.eq_ignore_ascii_case(field.trim()));
+        let want = match (find(&spec.rows), find(&spec.columns)) {
+            (Some(k), _) => &mut row_want[k],
+            (None, Some(k)) => &mut col_want[k],
+            _ => return Err(format!("'{}' is not a row or column field of {}", field, spec.name)),
+        };
+        if want.replace(item).is_some() {
+            return Err(format!("'{}' is given twice", field));
+        }
+    }
+    let Prepared { engine, row_slots, col_slots } = prepare(spec, data)?;
+    // Parent lines in compact/outline form show values only when their
+    // subtotal is shown at the top of the group.
+    let shows_values = |s: &Slot| match s {
+        Slot::Item { parent: true, path } => {
+            spec.options.subtotals_at_top && spec.rows[path.len() - 1].subtotals
+        }
+        _ => true,
+    };
+    let pick = |slots: &[Slot], want: &[Option<&str>]| -> Result<Path, String> {
+        let depth = want.iter().rposition(Option::is_some).map_or(0, |k| k + 1);
+        let mut found: Vec<&[String]> = slots
+            .iter()
+            .filter(|s| shows_values(s))
+            .map(Slot::agg_path)
+            .filter(|p| {
+                p.len() == depth
+                    && p.iter().zip(want).all(|(label, w)| w.is_none_or(|w| item_matches(label, w)))
+            })
+            .collect();
+        found.sort();
+        found.dedup();
+        match found.as_slice() {
+            [one] => Ok(one.to_vec()),
+            [] => Err("The PivotTable doesn't show that item".to_string()),
+            _ => Err("More than one item matches; name the outer fields too".to_string()),
+        }
+    };
+    let rp = pick(&row_slots, &row_want)?;
+    let cp = pick(&col_slots, &col_want)?;
+    engine.shown(&rp, &cp, v).ok_or_else(|| "The PivotTable shows no value there".to_string())
+}
+
+/// A PivotTable found by name, for GETPIVOTDATA.
+pub struct NamedPivot<'a> {
+    pub spec: &'a PivotSpec,
+    /// The sheet holding the pivot; an unqualified source is on it.
+    pub sheet: &'a Spreadsheet,
+    /// That sheet's name when the pivot was found through the workbook.
+    pub sheet_name: Option<&'a str>,
+}
+
+impl NamedPivot<'_> {
+    pub fn read(&self, wb: Option<&Workbook>) -> Result<PivotData, String> {
+        PivotData::read_on(wb, self.sheet, &self.spec.source)
+    }
+
+    /// The source range's corners as formula references, the first one
+    /// sheet-qualified when the source isn't on the formula's own sheet.
+    pub fn source_range(&self) -> Option<(String, String)> {
+        let src = SourceRange::parse(&self.spec.source).ok()?;
+        let a1 = |(r, c): (usize, usize)| format!("{}{}", Spreadsheet::column_label(c), r + 1);
+        let start = match src.sheet.as_deref().or(self.sheet_name) {
+            Some(sheet) => format!("'{}'!{}", sheet.replace('\'', "''"), a1(src.start)),
+            None => a1(src.start),
+        };
+        Some((start, a1(src.end)))
+    }
+}
+
+/// Split a pivot name as written in GETPIVOTDATA into a sheet and the
+/// pivot's name when it is qualified (`Sheet2!PivotTable1`,
+/// `'My Data'!PivotTable1`). Sheet and pivot names may both contain `!`, so
+/// every split point is tried against the workbook's sheet names.
+pub fn split_pivot_name<'n>(sheet_names: &[String], name: &'n str) -> Option<(usize, &'n str)> {
+    name.match_indices('!').find_map(|(i, _)| {
+        let sheet = unquote_sheet(&name[..i]);
+        let idx = sheet_names.iter().position(|n| n.eq_ignore_ascii_case(&sheet))?;
+        Some((idx, &name[i + 1..]))
+    })
+}
+
+/// Find the PivotTable `name` (`PivotTable1`, or `Sheet2!PivotTable1`):
+/// on the formula's own sheet first, then on the others in tab order.
+pub fn find_pivot<'a>(wb: Option<&'a Workbook>, host: &'a Spreadsheet, name: &str) -> Option<NamedPivot<'a>> {
+    let name = name.trim();
+    let on = |sheet: &'a Spreadsheet, sheet_name: Option<&'a str>, pivot: &str| {
+        sheet
+            .pivots
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(pivot.trim()))
+            .map(|spec| NamedPivot { spec, sheet, sheet_name })
+    };
+    if let Some(wb) = wb
+        && let Some((i, pivot)) = split_pivot_name(&wb.sheet_names, name)
+        && let Some(found) = on(&wb.sheets[i], Some(&wb.sheet_names[i]), pivot)
+    {
+        return Some(found);
+    }
+    if let Some(found) = on(host, None, name) {
+        return Some(found);
+    }
+    let wb = wb?;
+    wb.sheets.iter().zip(&wb.sheet_names).find_map(|(s, n)| on(s, Some(n), name))
+}
+
+/// Follow a sheet rename in GETPIVOTDATA calls that name their pivot as
+/// `old!PivotTable1`. Returns `None` when nothing changed.
+pub fn rename_sheet_in_pivot_names(formula: &str, old: &str, new: &str) -> Option<String> {
+    map_getpivotdata_names(formula, |name| {
+        name.match_indices('!')
+            .find(|(i, _)| unquote_sheet(&name[..*i]).eq_ignore_ascii_case(old))
+            .map(|(i, _)| format!("{}!{}", new, &name[i + 1..]))
+    })
+}
+
+fn unquote_sheet(s: &str) -> String {
+    s.trim().trim_matches('\'').replace("''", "'")
+}
+
+/// Rewrite the pivot names that GETPIVOTDATA calls in `formula` pass as a
+/// string literal (their second argument; item names and other text are
+/// left alone). `f` gets each name and returns its replacement, if any.
+/// Returns `None` when nothing changed.
+pub fn map_getpivotdata_names(formula: &str, mut f: impl FnMut(&str) -> Option<String>) -> Option<String> {
+    let mut out = String::with_capacity(formula.len());
+    let mut last = 0;
+    for (start, end) in pivot_name_literals(formula) {
+        let name = formula[start..end].replace("\"\"", "\"");
+        if let Some(new) = f(&name) {
+            out.push_str(&formula[last..start]);
+            out.push_str(&new.replace('"', "\"\""));
+            last = end;
+        }
+    }
+    if last == 0 {
+        return None;
+    }
+    out.push_str(&formula[last..]);
+    Some(out)
+}
+
+/// Byte ranges of the contents of every GETPIVOTDATA call's second
+/// argument, when that argument is a string literal.
+fn pivot_name_literals(formula: &str) -> Vec<(usize, usize)> {
+    const NAME: &str = "GETPIVOTDATA";
+    let b = formula.as_bytes();
+    // Index of the closing quote of the literal opening at `open`.
+    let close = |open: usize| -> Option<usize> {
+        let mut i = open + 1;
+        while i < b.len() {
+            if b[i] == b'"' {
+                if b.get(i + 1) == Some(&b'"') {
+                    i += 2;
+                    continue;
+                }
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    };
+    let skip_ws = |mut i: usize| {
+        while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        i
+    };
+    let is_ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'.';
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            i = close(i).map_or(b.len(), |c| c + 1);
+            continue;
+        }
+        let call = b.len() - i >= NAME.len()
+            && b[i..i + NAME.len()].eq_ignore_ascii_case(NAME.as_bytes())
+            && (i == 0 || !is_ident(b[i - 1]));
+        if !call {
+            i += 1;
+            continue;
+        }
+        i += NAME.len();
+        let mut j = skip_ws(i);
+        if b.get(j) != Some(&b'(') {
+            continue;
+        }
+        // Skip the first argument up to its top-level comma.
+        j += 1;
+        let mut depth = 0usize;
+        while j < b.len() {
+            match b[j] {
+                b'"' => {
+                    j = close(j).map_or(b.len(), |c| c + 1);
+                    continue;
+                }
+                b'(' | b'{' => depth += 1,
+                b')' | b'}' if depth == 0 => break,
+                b')' | b'}' => depth -= 1,
+                b',' if depth == 0 => break,
+                _ => {}
+            }
+            j += 1;
+        }
+        if b.get(j) != Some(&b',') {
+            continue;
+        }
+        let open = skip_ws(j + 1);
+        if b.get(open) == Some(&b'"')
+            && let Some(c) = close(open)
+        {
+            spans.push((open + 1, c));
+        }
+        // Calls nested in the arguments are found as the scan goes on.
+    }
+    spans
 }
 
 /// Ordered child items for every prefix on one axis, applying each field's
@@ -981,6 +1322,105 @@ mod tests {
     fn missing_field_is_reported() {
         let err = compute_pivot(&spec(&["Nope"], &[], &[]), &data()).unwrap_err();
         assert!(err.contains("Nope"));
+    }
+
+    fn lookup(s: &PivotSpec, value: &str, items: &[(&str, &str)]) -> Result<f64, String> {
+        let items: Vec<(String, String)> = items.iter().map(|(f, i)| (f.to_string(), i.to_string())).collect();
+        get_pivot_data(s, &data(), value, &items)
+    }
+
+    #[test]
+    fn get_pivot_data_reads_items_totals_and_cross_tabs() {
+        let s = spec(&["Region"], &["Month"], &[("Revenue", Summarize::Sum)]);
+        assert_eq!(lookup(&s, "Sum of Revenue", &[("Region", "North")]), Ok(300.0));
+        assert_eq!(lookup(&s, "sum of revenue", &[("region", "north"), ("Month", "Feb")]), Ok(200.0));
+        assert_eq!(lookup(&s, "Revenue", &[("Month", "Jan")]), Ok(180.0), "source field name works too");
+        assert_eq!(lookup(&s, "Sum of Revenue", &[]), Ok(450.0), "grand total");
+        assert!(lookup(&s, "Sum of Revenue", &[("Region", "West"), ("Month", "Feb")]).is_err(), "empty cell");
+        assert!(lookup(&s, "Sum of Revenue", &[("Region", "East")]).is_err());
+        assert!(lookup(&s, "Count of Revenue", &[]).is_err());
+        assert!(lookup(&s, "Sum of Revenue", &[("Revenue", "1")]).is_err(), "not a row/column field");
+    }
+
+    #[test]
+    fn get_pivot_data_follows_what_the_pivot_shows() {
+        let mut s = spec(&["Region", "Month"], &[], &[("Revenue", Summarize::Sum)]);
+        assert_eq!(lookup(&s, "Sum of Revenue", &[("Region", "South")]), Ok(120.0), "subtotal");
+        assert_eq!(lookup(&s, "Sum of Revenue", &[("Region", "West"), ("Month", "Jan")]), Ok(30.0));
+        // "Jan" alone is ambiguous: it appears under several regions.
+        assert!(lookup(&s, "Sum of Revenue", &[("Month", "Jan")]).is_err());
+        assert_eq!(lookup(&s, "Sum of Revenue", &[("Month", "Feb"), ("Region", "South")]), Ok(70.0));
+
+        s.rows[0].subtotals = false;
+        assert!(lookup(&s, "Sum of Revenue", &[("Region", "South")]).is_err(), "subtotal switched off");
+        s.options.grand_totals_columns = false;
+        assert!(lookup(&s, "Sum of Revenue", &[]).is_err(), "grand total switched off");
+        s.rows[0].hidden_items = vec!["North".into()];
+        assert!(lookup(&s, "Sum of Revenue", &[("Region", "North"), ("Month", "Jan")]).is_err(), "hidden item");
+
+        let mut s = spec(&["Region"], &[], &[("Revenue", Summarize::Sum)]);
+        s.values[0].show_as = ShowValuesAs::PercentOfGrandTotal;
+        assert_eq!(lookup(&s, "Sum of Revenue", &[("Region", "West")]), Ok(30.0 / 450.0), "shown value");
+    }
+
+    #[test]
+    fn value_cells_carry_their_getpivotdata_formula() {
+        let s = spec(&["Region"], &["Month"], &[("Revenue", Summarize::Sum)]);
+        let out = compute_pivot(&s, &data()).unwrap();
+        let formulas: Vec<String> = out
+            .table
+            .iter()
+            .flatten()
+            .filter_map(|c| c.reference.as_ref().map(|r| r.formula(&s, None)))
+            .collect();
+        assert!(formulas.contains(
+            &r#"GETPIVOTDATA("Sum of Revenue","PivotTable1","Region","North","Month","Feb")"#.to_string()
+        ));
+        assert!(formulas.contains(&r#"GETPIVOTDATA("Sum of Revenue","PivotTable1")"#.to_string()));
+        // Every formula reproduces the value it was taken from.
+        for cell in out.table.iter().flatten() {
+            let Some(r) = &cell.reference else { continue };
+            let v = s.values[r.value].display_name();
+            assert_eq!(get_pivot_data(&s, &data(), &v, &r.items).ok(), cell.number);
+        }
+        let numeric = PivotRef { value: 0, items: vec![("Year".into(), "2024".into()), ("Code".into(), "007".into())] };
+        assert_eq!(numeric.formula(&s, None), r#"GETPIVOTDATA("Sum of Revenue","PivotTable1","Year",2024,"Code",007)"#);
+        let grand = PivotRef { value: 0, items: Vec::new() };
+        assert_eq!(grand.formula(&s, Some("Q1 Data")), r#"GETPIVOTDATA("Sum of Revenue","Q1 Data!PivotTable1")"#);
+        assert!(item_matches("007", "7"));
+    }
+
+    #[test]
+    fn only_getpivotdata_pivot_names_are_rewritten() {
+        let upper = |n: &str| Some(n.to_uppercase());
+        // Item names, other functions' text and the value field stay.
+        assert_eq!(
+            map_getpivotdata_names(r#"=IF(A1="p",GETPIVOTDATA("p", "p" ,"p","p"),"p")"#, upper).as_deref(),
+            Some(r#"=IF(A1="p",GETPIVOTDATA("p", "P" ,"p","p"),"p")"#)
+        );
+        // A nested call in an argument, a computed first argument, escapes.
+        assert_eq!(
+            map_getpivotdata_names(
+                r#"=getpivotdata(CONCAT("a",",b"),"x",F,GETPIVOTDATA("v","y""z"))"#,
+                upper
+            )
+            .as_deref(),
+            Some(r#"=getpivotdata(CONCAT("a",",b"),"X",F,GETPIVOTDATA("v","Y""Z"))"#)
+        );
+        // A name from a cell isn't a literal; MYGETPIVOTDATA isn't the call.
+        assert_eq!(map_getpivotdata_names(r#"=GETPIVOTDATA("v",A1)"#, upper), None);
+        assert_eq!(map_getpivotdata_names(r#"=XGETPIVOTDATA("v","x")"#, upper), None);
+        assert_eq!(map_getpivotdata_names(r#"=GETPIVOTDATA("v","x"#, upper), None, "unterminated");
+
+        assert_eq!(
+            rename_sheet_in_pivot_names(r#"=GETPIVOTDATA("Sum of X","'Old Data'!P","Region","Old Data!P")"#, "old data", "New")
+                .as_deref(),
+            Some(r#"=GETPIVOTDATA("Sum of X","New!P","Region","Old Data!P")"#)
+        );
+        let sheets = vec!["a!b".to_string(), "Data".to_string()];
+        assert_eq!(split_pivot_name(&sheets, "a!b!Sales!Q1"), Some((0, "Sales!Q1")));
+        assert_eq!(split_pivot_name(&sheets, "'data'!P"), Some((1, "P")));
+        assert_eq!(split_pivot_name(&sheets, "Sales!Q1"), None);
     }
 
     #[test]

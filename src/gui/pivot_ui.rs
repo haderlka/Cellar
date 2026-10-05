@@ -16,10 +16,10 @@ use std::rc::Rc;
 
 use eframe::egui::{
     self, Color32, ComboBox, FontId, Frame, Margin, PopupCloseBehavior, Rect, RichText, Sense,
-    Stroke, Ui, pos2, vec2,
+    Stroke, StrokeKind, Ui, pos2, vec2,
 };
 use cellar::domain::{
-    NumberFormat, PivotCellKind, PivotData, PivotField, PivotLayout, PivotOutput, PivotSort,
+    NumberFormat, PivotCellKind, PivotData, PivotField, PivotLayout, PivotOutput, PivotRef, PivotSort,
     PivotSpec, PivotValue, ShowValuesAs, Spreadsheet, Summarize, TopFilter, compute_pivot,
 };
 
@@ -335,7 +335,7 @@ impl GuiApp {
                 .current_sheet()
                 .pivots
                 .iter()
-                .any(|p| p.name == name);
+                .any(|p| p.name.eq_ignore_ascii_case(&name));
             match PivotData::read(&self.app.workbook, host, dlg.source.trim()) {
                 _ if name.is_empty() => dlg.error = Some("Enter a name".into()),
                 _ if taken => {
@@ -676,11 +676,17 @@ impl GuiApp {
                 }
             }
             Ok(out) => {
-                egui::ScrollArea::horizontal()
+                // While a formula is being typed, clicking a value inserts
+                // its GETPIVOTDATA call, like clicking a cell inserts A1.
+                let picking = self.edit.as_ref().is_some_and(|e| e.text.starts_with('='));
+                let picked = egui::ScrollArea::horizontal()
                     .id_salt(("pivot_table", idx))
-                    .show(ui, |ui| {
-                        paint_table(ui, out, &spec, data, &mut new_spec, idx);
-                    });
+                    .show(ui, |ui| paint_table(ui, out, &spec, data, &mut new_spec, idx, picking))
+                    .inner;
+                if let Some(reference) = picked {
+                    let sheet = self.reference_sheet_prefix().map(|_| self.app.workbook.sheet_names[self.app.workbook.active_sheet].clone());
+                    self.insert_reference(&reference.formula(&spec, sheet.as_deref()));
+                }
             }
         }
         if new_spec != spec {
@@ -997,7 +1003,7 @@ impl GuiApp {
                 .pivots
                 .iter()
                 .enumerate()
-                .any(|(i, p)| i != dlg.pivot && p.name == name);
+                .any(|(i, p)| i != dlg.pivot && p.name.eq_ignore_ascii_case(&name));
             let host = self.app.workbook.active_sheet;
             if name.is_empty() || clash {
                 dlg.error = Some("The name must be unique and not empty".into());
@@ -1404,7 +1410,10 @@ const PT_ROW_H: f32 = 21.0;
 const PT_FONT: f32 = 12.5;
 
 /// Paint the pivot output Excel-style and add the Row/Column Labels
-/// dropdowns (sort + filter of the first field on that axis).
+/// dropdowns (sort + filter of the first field on that axis). Value cells
+/// offer their GETPIVOTDATA formula: copied from the context menu, or,
+/// when `picking`, the clicked cell's reference is returned for the
+/// formula being typed.
 fn paint_table(
     ui: &mut Ui,
     out: &PivotOutput,
@@ -1412,7 +1421,8 @@ fn paint_table(
     data: &PivotData,
     new_spec: &mut PivotSpec,
     idx: usize,
-) {
+    picking: bool,
+) -> Option<PivotRef> {
     let font = FontId::proportional(PT_FONT);
     let dark = ui.visuals().dark_mode;
     let text = ui.visuals().text_color();
@@ -1462,6 +1472,7 @@ fn paint_table(
         .collect();
 
     let mut dropdowns: Vec<(Rect, bool)> = Vec::new();
+    let mut value_cells = Vec::new();
     for (r, row) in out.table.iter().enumerate() {
         let y = rect.min.y + r as f32 * PT_ROW_H;
         let is_header = r < out.header_rows;
@@ -1484,6 +1495,9 @@ fn paint_table(
                 continue;
             }
             let cell_rect = Rect::from_min_size(pos2(xs[c], y), vec2(widths[c], PT_ROW_H));
+            if let Some(reference) = &cell.reference {
+                value_cells.push((cell_rect, reference));
+            }
             let bold = is_header || bold_row || cell.kind == PivotCellKind::Grand;
             let galley = painter.layout_no_wrap(cell.text.clone(), font.clone(), text);
             let x = if cell.number.is_some() {
@@ -1516,6 +1530,27 @@ fn paint_table(
         rect.min.y + out.header_rows as f32 * PT_ROW_H,
         Stroke::new(1.0, line),
     );
+
+    let mut picked = None;
+    let accent = ui.visuals().selection.stroke.color;
+    for (k, (cell_rect, reference)) in value_cells.into_iter().enumerate() {
+        let resp = ui.interact(cell_rect, egui::Id::new(("pivot_value", idx, k)), Sense::click());
+        if picking {
+            if resp.hovered() {
+                painter.rect_stroke(cell_rect, 0.0, Stroke::new(1.5, accent), StrokeKind::Inside);
+            }
+            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                picked = Some(reference.clone());
+            }
+        } else {
+            resp.context_menu(|ui| {
+                if ui.button("Copy GETPIVOTDATA formula").clicked() {
+                    ui.ctx().copy_text(format!("={}", reference.formula(spec, None)));
+                    ui.close();
+                }
+            });
+        }
+    }
 
     // Dropdown menus for the axis captions.
     let values: Vec<String> = spec.values.iter().map(|v| v.display_name()).collect();
@@ -1568,4 +1603,5 @@ fn paint_table(
                 item_checklist(ui, &items, &mut field.hidden_items);
             });
     }
+    picked
 }

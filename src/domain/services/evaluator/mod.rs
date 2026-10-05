@@ -30,7 +30,7 @@ mod tests;
 /// tokenize the leading digit as a number — e.g. emitting `1Q!A5` breaks
 /// the lexer at the `1`). Apostrophes inside the name are escaped by
 /// doubling, matching the lexer's quoted-sheet syntax.
-pub(super) fn format_sheet_name(name: &str) -> String {
+pub fn format_sheet_name(name: &str) -> String {
     let starts_with_digit = name.chars().next().is_some_and(|c| c.is_ascii_digit());
     let has_non_ident = !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     let needs_quotes = name.is_empty() || starts_with_digit || has_non_ident;

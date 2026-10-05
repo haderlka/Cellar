@@ -74,8 +74,11 @@ impl<'a> FormulaEvaluator<'a> {
             Expr::Unary { operand, .. } => {
                 self.check_circular_reference_in_ast(operand, target_cell, visited)
             }
-            Expr::FunctionCall { args, .. } => {
+            Expr::FunctionCall { name, args } => {
                 args.iter().any(|arg| self.check_circular_reference_in_ast(arg, target_cell, visited))
+                    || self
+                        .pivot_source(name, args)
+                        .is_some_and(|source| self.check_circular_reference_in_ast(&source, target_cell, visited))
             }
             // NamedRef: resolve via names and recursively check.
             Expr::NamedRef(name) => {

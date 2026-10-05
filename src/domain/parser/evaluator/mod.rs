@@ -52,7 +52,11 @@ fn walk_purity(expr: &Expr, registry: &FunctionRegistry, acc: &mut FunctionPurit
             let inline_volatile_structural = matches!(
                 upper.as_str(),
                 "INDIRECT" | "OFFSET"
-            );
+            )
+                // GETPIVOTDATA depends on its pivot's source range, which
+                // the dependency graph knows only when the PivotTable is
+                // named by a literal.
+                || (upper == "GETPIVOTDATA" && !matches!(args.get(1), Some(Expr::String(_))));
             if inline_volatile_structural {
                 *acc = acc.join(FunctionPurity::VolatileStructural);
             } else {
@@ -420,6 +424,9 @@ impl<'a> ExpressionEvaluator<'a> {
                 if upper == "OFFSET" {
                     return self.eval_offset(args);
                 }
+                if upper == "GETPIVOTDATA" {
+                    return self.eval_getpivotdata(args);
+                }
                 // Higher-order lambda helpers: last arg must be a LAMBDA.
                 if matches!(upper.as_str(), "MAP" | "REDUCE" | "BYROW" | "BYCOL" | "SCAN" | "MAKEARRAY") {
                     return self.eval_lambda_helper(&upper, args);
@@ -743,6 +750,37 @@ impl<'a> ExpressionEvaluator<'a> {
         } else {
             Ok(Value::String(cell.value))
         }
+    }
+
+    /// GETPIVOTDATA(data_field, pivot_table, [field1, item1], …) → a value
+    /// shown in a PivotTable. Cellar's PivotTables live in the sidebar, not
+    /// in cells, so `pivot_table` is the pivot's name (`"PivotTable1"` or
+    /// `"Sheet2!PivotTable1"`) rather than a cell inside it. Anything the
+    /// PivotTable doesn't show is `#REF!`, as in Excel.
+    fn eval_getpivotdata(&self, args: &[Expr]) -> Result<Value, String> {
+        if args.len() < 2 || !args.len().is_multiple_of(2) {
+            return Err(
+                "GETPIVOTDATA requires a value field, a PivotTable name and field/item pairs"
+                    .to_string(),
+            );
+        }
+        let mut texts = Vec::with_capacity(args.len());
+        for a in args {
+            match self.evaluate(a)? {
+                Value::Error(e) => return Ok(Value::Error(e)),
+                v => texts.push(v.to_string()),
+            }
+        }
+        use crate::domain::services::{find_pivot, get_pivot_data};
+        let Some(pivot) = find_pivot(self.workbook, self.spreadsheet, &texts[1]) else {
+            return Ok(Value::Error(ErrorKind::Ref));
+        };
+        let items: Vec<(String, String)> =
+            texts[2..].chunks(2).map(|p| (p[0].clone(), p[1].clone())).collect();
+        Ok(pivot
+            .read(self.workbook)
+            .and_then(|data| get_pivot_data(pivot.spec, &data, &texts[0], &items))
+            .map_or(Value::Error(ErrorKind::Ref), Value::Number))
     }
 
     /// Map an optional sheet name (case-insensitive) to a `&Spreadsheet`.

@@ -418,3 +418,219 @@ fn undo_and_redo_of_a_cell_edit_apply_to_the_sheet_it_was_made_on() {
     assert_eq!(app.workbook.sheets[1].get_cell(0, 0).value, "on sheet 2");
     assert_eq!(app.workbook.sheets[0].get_cell(0, 0).value, "on sheet 1");
 }
+
+/// GETPIVOTDATA reads a PivotTable from a formula and follows changes to
+/// the source data (including data computed by formulas), to the pivot's
+/// definition and name, and to its removal.
+#[test]
+fn getpivotdata_tracks_data_and_pivot_changes() {
+    use crate::domain::{PivotField, PivotSpec, PivotValue, Summarize};
+    fn enter(app: &mut App, sheet: usize, row: usize, col: usize, text: &str) {
+        app.switch_to_sheet(sheet);
+        app.selected_row = row;
+        app.selected_col = col;
+        app.input = text.to_string();
+        app.mode = AppMode::Editing;
+        app.finish_editing();
+    }
+    let value = |app: &App, sheet: usize, row: usize, col: usize| app.workbook.sheets[sheet].get_cell(row, col).value;
+
+    let mut app = App::default();
+    app.workbook.add_sheet("Report".to_string());
+    let rows = [["Region", "Revenue", "Units"], ["North", "100", "1"], ["South", "50", "2"], ["North", "=C4*10", "7"]];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, text) in row.iter().enumerate() {
+            enter(&mut app, 0, r, c, text);
+        }
+    }
+    app.switch_to_sheet(0);
+    let mut spec = PivotSpec::new("PivotTable1", "A1:B10");
+    spec.rows = vec![PivotField::new("Region")];
+    spec.values = vec![PivotValue::new("Revenue", Summarize::Sum)];
+    app.add_pivot(spec.clone());
+
+    enter(&mut app, 1, 0, 0, r#"=GETPIVOTDATA("Sum of Revenue","PivotTable1","Region","North")"#);
+    enter(&mut app, 1, 1, 0, r#"=GETPIVOTDATA("Revenue","PivotTable1")"#);
+    assert_eq!(value(&app, 1, 0, 0), "170");
+    assert_eq!(value(&app, 1, 1, 0), "220");
+
+    // A source value, a value computed by a formula, and a new row.
+    enter(&mut app, 0, 1, 1, "150");
+    assert_eq!(value(&app, 1, 0, 0), "220");
+    enter(&mut app, 0, 3, 2, "8");
+    assert_eq!(value(&app, 1, 0, 0), "230");
+    enter(&mut app, 0, 4, 0, "North");
+    enter(&mut app, 0, 4, 1, "5");
+    assert_eq!(value(&app, 1, 0, 0), "235");
+
+    // A formula inside the pivot's own source would be circular.
+    enter(&mut app, 0, 5, 1, r#"=GETPIVOTDATA("Sum of Revenue","PivotTable1")"#);
+    assert!(app.workbook.sheets[0].get_cell(5, 1).formula.is_none());
+
+    // Renaming the pivot keeps the formulas working; undo restores both.
+    app.switch_to_sheet(0);
+    let mut renamed = app.workbook.sheets[0].pivots[0].clone();
+    renamed.name = "Sales".to_string();
+    app.replace_pivot(0, renamed);
+    let formula = app.workbook.sheets[1].get_cell(0, 0).formula.unwrap();
+    assert!(formula.contains(r#""Sheet1!Sales""#), "{formula}");
+    assert_eq!(value(&app, 1, 0, 0), "235");
+    app.undo();
+    assert!(app.workbook.sheets[1].get_cell(0, 0).formula.unwrap().contains(r#""PivotTable1""#));
+
+    // Hiding an item recalculates, and makes it unreachable like Excel.
+    app.switch_to_sheet(0);
+    let mut hidden = app.workbook.sheets[0].pivots[0].clone();
+    hidden.rows[0].hidden_items = vec!["South".to_string()];
+    app.replace_pivot(0, hidden);
+    assert_eq!(value(&app, 1, 1, 0), "235");
+
+    app.remove_pivot(0);
+    assert_eq!(value(&app, 1, 0, 0), "#REF!");
+}
+
+
+/// Renaming a sheet keeps everything that names it working: cell formulas,
+/// a PivotTable whose source is on it, GETPIVOTDATA calls that name a pivot
+/// as `Sheet!Pivot`, and chart ranges.
+#[test]
+fn renaming_a_sheet_keeps_references_to_it_working() {
+    use crate::domain::{ChartSeries, ChartSpec, PivotField, PivotSpec, PivotValue, Summarize};
+    fn enter(app: &mut App, sheet: usize, row: usize, col: usize, text: &str) {
+        app.switch_to_sheet(sheet);
+        app.selected_row = row;
+        app.selected_col = col;
+        app.input = text.to_string();
+        app.mode = AppMode::Editing;
+        app.finish_editing();
+    }
+    let value = |app: &App, sheet: usize, row: usize, col: usize| app.workbook.sheets[sheet].get_cell(row, col).value;
+
+    let mut app = App::default();
+    app.workbook.add_sheet("Pivots".to_string());
+    app.workbook.add_sheet("Report".to_string());
+    let rows = [["Region", "Revenue"], ["North", "100"], ["South", "50"], ["North", "20"]];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, text) in row.iter().enumerate() {
+            enter(&mut app, 0, r, c, text);
+        }
+    }
+    // The pivot lives on "Pivots" and reads "Sheet1".
+    app.switch_to_sheet(1);
+    let mut spec = PivotSpec::new("PivotTable1", "Sheet1!A1:B4");
+    spec.rows = vec![PivotField::new("Region")];
+    spec.values = vec![PivotValue::new("Revenue", Summarize::Sum)];
+    app.add_pivot(spec);
+    app.workbook.sheets[1].charts.push(ChartSpec {
+        title: "Revenue".into(),
+        chart_type: Default::default(),
+        pivot: None,
+        categories: Some("Sheet1!A2:A4".into()),
+        series: vec![ChartSeries { name: Some("Sheet1!B1".into()), values: "Sheet1!B2:B4".into() }],
+    });
+
+    enter(&mut app, 2, 0, 0, "=Sheet1!B2*2");
+    enter(&mut app, 2, 1, 0, r#"=GETPIVOTDATA("Sum of Revenue","Pivots!PivotTable1","Region","North")"#);
+    assert_eq!(value(&app, 2, 0, 0), "200");
+    assert_eq!(value(&app, 2, 1, 0), "120");
+
+    app.switch_to_sheet(0);
+    assert!(app.workbook.rename_sheet("Raw data".to_string()));
+    app.switch_to_sheet(1);
+    assert!(app.workbook.rename_sheet("Summary".to_string()));
+
+    let pivots = &app.workbook.sheets[1];
+    assert_eq!(pivots.pivots[0].source, "'Raw data'!A1:B4");
+    let chart = &pivots.charts[0];
+    assert_eq!(chart.categories.as_deref(), Some("'Raw data'!A2:A4"));
+    assert_eq!(chart.series[0].name.as_deref(), Some("'Raw data'!B1"));
+    assert_eq!(chart.series[0].values, "'Raw data'!B2:B4");
+    assert!(
+        app.workbook.sheets[2].get_cell(1, 0).formula.unwrap().contains(r#""Summary!PivotTable1""#),
+        "GETPIVOTDATA's sheet-qualified pivot name follows the rename"
+    );
+
+    // Still live after the renames.
+    enter(&mut app, 0, 1, 1, "300");
+    assert_eq!(value(&app, 2, 0, 0), "600");
+    assert_eq!(value(&app, 2, 1, 0), "320");
+}
+
+
+/// Renaming, adding and removing pivots never points a GETPIVOTDATA formula
+/// at a different pivot or rewrites anything but the pivot's name.
+#[test]
+fn pivot_renames_keep_getpivotdata_formulas_on_their_pivot() {
+    use crate::domain::{PivotField, PivotSpec, PivotValue, Summarize};
+    fn enter(app: &mut App, sheet: usize, row: usize, col: usize, text: &str) {
+        app.switch_to_sheet(sheet);
+        app.selected_row = row;
+        app.selected_col = col;
+        app.input = text.to_string();
+        app.mode = AppMode::Editing;
+        app.finish_editing();
+    }
+    fn pivot(name: &str, value: &str) -> PivotSpec {
+        let mut spec = PivotSpec::new(name, "A1:B4");
+        spec.rows = vec![PivotField::new("Dept")];
+        spec.values = vec![PivotValue::new(value, Summarize::Sum)];
+        spec
+    }
+    let formula = |app: &App, sheet: usize, row: usize| app.workbook.sheets[sheet].get_cell(row, 0).formula.unwrap();
+    let value = |app: &App, sheet: usize, row: usize| app.workbook.sheets[sheet].get_cell(row, 0).value;
+
+    // Two data sheets with a pivot each; a report sheet in between.
+    let mut app = App::default();
+    app.workbook.add_sheet("Report".to_string());
+    app.workbook.add_sheet("Other".to_string());
+    for sheet in [0, 2] {
+        let k = if sheet == 0 { "1" } else { "1000" };
+        let rows = [["Dept", "Amount"], ["Sales", k], ["Ops", k], ["Sales", k]];
+        for (r, row) in rows.iter().enumerate() {
+            for (c, text) in row.iter().enumerate() {
+                enter(&mut app, sheet, r, c, text);
+            }
+        }
+    }
+    app.switch_to_sheet(2);
+    app.add_pivot(pivot("Sales", "Amount"));
+    // The report uses "Sales" plainly; only Other has a pivot by that name.
+    // The item is also called "Sales".
+    enter(&mut app, 1, 0, 0, r#"=GETPIVOTDATA("Sum of Amount","Sales","Dept","Sales")"#);
+    assert_eq!(value(&app, 1, 0), "2000");
+
+    // A new "Sales" pivot on the first sheet would be found first; the
+    // report keeps reading Other's pivot.
+    app.switch_to_sheet(0);
+    app.add_pivot(pivot("Sales", "Amount"));
+    assert_eq!(formula(&app, 1, 0), r#"=GETPIVOTDATA("Sum of Amount","Other!Sales","Dept","Sales")"#);
+    assert_eq!(value(&app, 1, 0), "2000");
+
+    // Renaming Other's pivot follows it; the "Sales" item stays.
+    app.switch_to_sheet(2);
+    app.replace_pivot(0, PivotSpec { name: "Revenue".into(), ..app.workbook.sheets[2].pivots[0].clone() });
+    assert_eq!(formula(&app, 1, 0), r#"=GETPIVOTDATA("Sum of Amount","Other!Revenue","Dept","Sales")"#);
+    assert_eq!(value(&app, 1, 0), "2000");
+
+    // A plain name used on the pivot's own sheet stays plain.
+    enter(&mut app, 2, 9, 0, r#"=GETPIVOTDATA("Sum of Amount","Revenue")"#);
+    app.switch_to_sheet(2);
+    app.replace_pivot(0, PivotSpec { name: "Income".into(), ..app.workbook.sheets[2].pivots[0].clone() });
+    assert_eq!(formula(&app, 2, 9), r#"=GETPIVOTDATA("Sum of Amount","Income")"#);
+    assert_eq!(value(&app, 2, 9), "3000");
+
+    // Removing the pivot: #REF!, not the first sheet's same-named pivot.
+    app.switch_to_sheet(0);
+    app.replace_pivot(0, PivotSpec { name: "Income".into(), ..app.workbook.sheets[0].pivots[0].clone() });
+    app.switch_to_sheet(2);
+    app.remove_pivot(0);
+    assert_eq!(value(&app, 1, 0), "#REF!");
+    assert_eq!(value(&app, 2, 9), "#REF!");
+    app.undo();
+    assert_eq!(value(&app, 1, 0), "2000");
+    assert_eq!(value(&app, 2, 9), "3000");
+
+    assert_eq!(app.next_pivot_name(), "PivotTable1");
+    app.workbook.sheets[2].pivots[0].name = "pivottable1".into();
+    assert_eq!(app.next_pivot_name(), "PivotTable2");
+}

@@ -523,7 +523,7 @@ pub fn builtin_function_names() -> Vec<&'static str> {
         "ARRAYTOTEXT", "FREQUENCY",
         "MAP", "REDUCE", "BYROW", "BYCOL", "SCAN", "MAKEARRAY",
         "SUMPRODUCT", "TRANSPOSE", "SEQUENCE", "FILTER", "SORT", "UNIQUE",
-        "INDIRECT", "OFFSET",
+        "INDIRECT", "OFFSET", "GETPIVOTDATA",
         "LET", "LAMBDA",
     ]
 }

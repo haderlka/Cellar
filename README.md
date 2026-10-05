@@ -52,7 +52,9 @@ workbook in a `.cellar` file:
   copy/paste that adjusts formulas and works with other apps.
 - About 160 Excel-compatible functions, dynamic arrays (`=SORT(A2:A9)`
   spills), `LET`/`LAMBDA`, cross-sheet references, named ranges.
-- While typing a formula, click or drag cells to insert references.
+- While typing a formula, click or drag cells to insert references. Click
+  another sheet's tab to pick cells there (`Sheet2!B4`); Enter takes you
+  back to the formula's cell.
 - **Fill handle** like Excel's: drag the square at the selection's corner
   to copy formulas (references shift) or continue series (1, 2 → 3, 4 ·
   Jan → Feb · Mon → Tue · Q1 → Q2 · Item1 → Item2). Ctrl (Option on
@@ -73,6 +75,12 @@ workbook in a `.cellar` file:
 - Report filters, compact/outline/tabular layout, grand totals, Σ Values
   on rows or columns. Months and weekdays sort in calendar order.
   Results update live as the data changes.
+- Use results in formulas with `GETPIVOTDATA`, as in Excel:
+  `=GETPIVOTDATA("Sum of Revenue", "PivotTable1", "Region", "East")`.
+  While typing a formula, click a value in the PivotTable to insert its
+  call; right-click a value to copy it. The pivot is named rather than
+  referenced by a cell (`"Sheet2!PivotTable1"` for another sheet's), and
+  renaming it updates the formulas.
 
 **Charts**
 - Column, line, pie and scatter charts in the sidebar, plotting cell ranges.
@@ -210,7 +218,7 @@ Formulas use Excel syntax: `=SUM(A1:A10)`, `=IF(B2>0, "yes", "no")`,
 |---|---|
 | Maths & statistics | ABS, ACOS, ASIN, ATAN, ATAN2, AVERAGE, CEILING, COMBIN, CORREL, COS, COSH, DEGREES, EVEN, EXP, FACT, FLOOR, FREQUENCY, GCD, INT, INTERCEPT, LARGE, LCM, LN, LOG, MAX, MEDIAN, MIN, MOD, MROUND, ODD, PERCENTILE.INC, PI, POWER, RADIANS, RAND, RANDBETWEEN, RANK.EQ, ROUND, ROUNDDOWN, ROUNDUP, RSQ, SIGN, SIN, SINH, SLOPE, SMALL, SQRT, STDEV, STDEV.P, STDEV.S, SUM, SUMPRODUCT, TAN, TANH, TRUNC, VAR.P, VAR.S |
 | Logic | AND, FALSE, IF, IFERROR, IFNA, IFS, NOT, OR, SWITCH, TRUE, XOR |
-| Lookup & reference | AVERAGEIF, COUNTIF, HLOOKUP, INDEX, INDIRECT, MATCH, OFFSET, SUMIF, VLOOKUP, XLOOKUP |
+| Lookup & reference | AVERAGEIF, COUNTIF, GETPIVOTDATA, HLOOKUP, INDEX, INDIRECT, MATCH, OFFSET, SUMIF, VLOOKUP, XLOOKUP |
 | Text | ARRAYTOTEXT, CHAR, CLEAN, CODE, CONCAT, DOLLAR, EXACT, FIND, FIXED, LEFT, LEN, LOWER, MID, NUMBERVALUE, PROPER, REGEXEXTRACT, REGEXMATCH, REGEXREPLACE, REPLACE, REPT, RIGHT, SEARCH, SUBSTITUTE, TEXT, TEXTAFTER, TEXTBEFORE, TEXTJOIN, TRIM, UNICHAR, UNICODE, UPPER, VALUE |
 | Date & time | DATE, DATEDIF, DATEVALUE, DAY, DAYS, EDATE, EOMONTH, HOUR, MINUTE, MONTH, NETWORKDAYS, NOW, SECOND, TIME, TIMEVALUE, TODAY, WEEKDAY, WORKDAY, YEAR, YEARFRAC |
 | Finance | FV, NPV, PMT, PV |

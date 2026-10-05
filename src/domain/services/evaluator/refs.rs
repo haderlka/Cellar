@@ -46,6 +46,19 @@ impl<'a> FormulaEvaluator<'a> {
         }
     }
 
+    /// `GETPIVOTDATA(…, "PivotTable1", …)` reads the pivot's source range:
+    /// returned as a range expression so it becomes a dependency. `None`
+    /// for other functions and for a pivot name that isn't a literal.
+    pub(super) fn pivot_source(&self, name: &str, args: &[Expr]) -> Option<Expr> {
+        if !name.eq_ignore_ascii_case("GETPIVOTDATA") {
+            return None;
+        }
+        let Some(Expr::String(pivot)) = args.get(1) else { return None };
+        let (start, end) =
+            crate::domain::services::find_pivot(self.workbook, self.spreadsheet, pivot)?.source_range()?;
+        Some(Expr::Range(start, end))
+    }
+
     fn extract_qualified_refs_from_ast(
         &self,
         expr: &Expr,
@@ -120,9 +133,12 @@ impl<'a> FormulaEvaluator<'a> {
             Expr::Unary { operand, .. } => {
                 self.extract_qualified_refs_from_ast(operand, out);
             }
-            Expr::FunctionCall { args, .. } => {
+            Expr::FunctionCall { name, args } => {
                 for arg in args {
                     self.extract_qualified_refs_from_ast(arg, out);
+                }
+                if let Some(source) = self.pivot_source(name, args) {
+                    self.extract_qualified_refs_from_ast(&source, out);
                 }
             }
             Expr::NamedRef(name) => {
@@ -180,9 +196,12 @@ impl<'a> FormulaEvaluator<'a> {
             Expr::Unary { operand, .. } => {
                 references.extend(self.extract_cell_references_from_ast(operand));
             }
-            Expr::FunctionCall { args, .. } => {
+            Expr::FunctionCall { name, args } => {
                 for arg in args {
                     references.extend(self.extract_cell_references_from_ast(arg));
+                }
+                if let Some(source) = self.pivot_source(name, args) {
+                    references.extend(self.extract_cell_references_from_ast(&source));
                 }
             }
             Expr::NamedRef(name) => {

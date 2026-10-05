@@ -1091,9 +1091,13 @@ impl Workbook {
                 .cells
                 .iter()
                 .filter_map(|(&(r, c), cd)| {
-                    cd.formula
-                        .as_ref()
-                        .map(|f| (r, c, rewrite_sheet_refs(f, &old_name, &new_name)))
+                    cd.formula.as_ref().map(|f| {
+                        let f = rewrite_sheet_refs(f, &old_name, &new_name);
+                        // GETPIVOTDATA names its pivot in a string literal.
+                        let f = crate::domain::services::rename_sheet_in_pivot_names(&f, &old_name, &new_name)
+                            .unwrap_or(f);
+                        (r, c, f)
+                    })
                 })
                 .filter(|(r, c, new_formula)| {
                     sheet
@@ -1108,6 +1112,24 @@ impl Workbook {
                 if let Some(cd) = sheet.cells.get_mut(&(r, c)) {
                     cd.formula = Some(formula);
                     touched_per_sheet[sheet_idx].push((r, c));
+                }
+            }
+        }
+        // PivotTable sources and chart ranges are range text too.
+        for sheet in &mut self.sheets {
+            let rename = |r: &mut String| *r = rewrite_sheet_refs_for_name_value(r, &old_name, &new_name);
+            for pivot in &mut sheet.pivots {
+                rename(&mut pivot.source);
+            }
+            for chart in &mut sheet.charts {
+                if let Some(c) = &mut chart.categories {
+                    rename(c);
+                }
+                for s in &mut chart.series {
+                    rename(&mut s.values);
+                    if let Some(n) = &mut s.name {
+                        rename(n);
+                    }
                 }
             }
         }
@@ -1172,6 +1194,32 @@ impl Workbook {
             let _ = self.recalc_via_graph_result();
         }
         existed
+    }
+
+    /// GETPIVOTDATA formulas depend on PivotTable definitions, which aren't
+    /// cells. After a pivot is added, edited or removed, rebuild the graph
+    /// (their source ranges may have moved) and recalculate them.
+    #[must_use = "recalc may report iterative-calc non-convergence"]
+    pub fn refresh_pivot_formulas(&mut self) -> Result<(), crate::domain::services::CalcError> {
+        let cells: Vec<CrossSheetKey> = self
+            .sheets
+            .iter()
+            .zip(&self.sheet_names)
+            .flat_map(|(sheet, name)| {
+                sheet.cells.iter().filter_map(move |(&(r, c), cd)| {
+                    cd.formula
+                        .as_ref()
+                        .filter(|f| f.to_uppercase().contains("GETPIVOTDATA"))
+                        .map(|_| (name.clone(), r, c))
+                })
+            })
+            .collect();
+        if cells.is_empty() {
+            return Ok(());
+        }
+        self.build_dep_graph_from_scratch();
+        self.dirty.extend(cells);
+        self.recalc_via_graph_result()
     }
 
     /// Mark a single cell as dirty. The cell's value may be stale and must

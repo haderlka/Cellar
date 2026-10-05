@@ -94,7 +94,7 @@ mod chart_data;
 mod markdown;
 pub mod import;
 
-pub use evaluator::FormulaEvaluator;
+pub use evaluator::{format_sheet_name, FormulaEvaluator};
 pub use autofill_pattern::AutofillPattern;
 pub use csv::CsvExporter;
 pub use executor::{
@@ -103,7 +103,10 @@ pub use executor::{
 pub use file_writer::{set_file_writer, write_file, FileWriter};
 pub use chart_data::{numbers, plottable, range_chart_data, read_range, resolve_chart_data, ChartData};
 pub use markdown::{range_to_markdown, sheet_to_markdown, used_range, workbook_to_markdown};
-pub use pivot::{compare_labels, compute_pivot, PivotCell, PivotCellKind, PivotChartData, PivotData, PivotOutput};
+pub use pivot::{
+    compare_labels, compute_pivot, find_pivot, get_pivot_data, map_getpivotdata_names, rename_sheet_in_pivot_names, split_pivot_name, NamedPivot, PivotCell,
+    PivotCellKind, PivotChartData, PivotData, PivotOutput, PivotRef, SourceRange,
+};
 pub use http::{http_fetch, set_http_fetcher, HttpFetchResult, HttpFetcher};
 
 #[cfg(test)]
