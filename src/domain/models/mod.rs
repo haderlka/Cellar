@@ -3,12 +3,14 @@
 //! Split into focused submodules:
 //! - style — NumberFormat, TerminalColor, CellStyle, CellFormat, format_cell_value
 //! - refs — sheet-name rewriting helpers
+//! - formula_refs — references in formula text, with positions (highlighting)
 //! - cell — CellData
 //! - spreadsheet — Spreadsheet struct (the workhorse) plus Table and ConditionalFormat (tightly coupled types)
 //! - workbook — Workbook (multi-sheet container) + cross-sheet dependency graph
 
 mod style;
 mod refs;
+mod formula_refs;
 mod cell;
 mod spreadsheet;
 mod workbook;
@@ -21,12 +23,16 @@ pub(crate) fn is_default<T: Default + PartialEq>(v: &T) -> bool {
     *v == T::default()
 }
 
-pub use style::{NumberFormat, TerminalColor, CellStyle, CellFormat, format_cell_value, MAX_DECIMALS};
+pub use style::{
+    format_cell_value, CellFormat, CellStyle, CurrencyNotation, NumberFormat, TerminalColor,
+    MAX_DECIMALS,
+};
 pub use refs::{
     replace_sheet_refs_with_ref_error,
     rewrite_sheet_refs,
     rewrite_sheet_refs_for_name_value,
 };
+pub use formula_refs::{formula_references, FormulaRef};
 pub use cell::CellData;
 pub use pivot::{
     PivotField, PivotLayout, PivotOptions, PivotSort, PivotSpec, PivotValue, ShowValuesAs, Summarize,

@@ -1,5 +1,29 @@
 # Changelog
 
+## Cellar 0.1.3 — 2026-10-06
+
+Row heights, coloured formula references, and decimal places for number
+formats. Files from 0.1.2 open unchanged.
+
+### Added
+
+- **Row heights**: drag a row header's bottom edge to resize the row;
+  with several whole rows selected, all of them get the new height.
+  Heights are saved in the `.cellar` file (`row_heights`) and imported
+  from and exported to Excel.
+- **Formula references in colour**: selecting or editing a formula
+  outlines the cells it reads, each reference in its own colour, and the
+  cell editor and formula bar colour the references to match, as in Excel.
+- **Format → Decimal places** sets the number of decimals for the
+  selected cells. Number, currency and percent formats keep their kind;
+  General cells become numbers.
+
+### Changed
+
+- **Currency symbols** sit where their countries put them:
+  `1,234.56 €`, `$1,234.56`, `CHF 1,234.56`. Excel exports use the same
+  placement. Negative amounts that round to zero no longer show `-0.00`.
+
 ## Cellar 0.1.2 — 2026-10-05
 
 New file imports, PivotTable results in formulas, and picking cells on

@@ -121,6 +121,11 @@ fn convert_xlsx_unguarded(path: &str) -> Result<(Workbook, ConversionReport), St
                         sheet.column_widths.insert(c, w);
                     }
                 }
+                for (r, h) in ex.row_heights {
+                    if r < sheet.rows {
+                        sheet.set_row_height(r, h);
+                    }
+                }
                 sheet.charts = ex.charts;
                 for pivot in ex.pivots {
                     match pivot {

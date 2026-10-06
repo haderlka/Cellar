@@ -260,3 +260,28 @@ fn xlsx_roundtrip_basic() {
         Some("=B1*2")
     );
 }
+
+#[test]
+fn xlsx_roundtrip_row_heights_and_euro_format() {
+    let mut wb = Workbook::default();
+    let euro = CellFormat {
+        number_format: NumberFormat::Currency { symbol: "€".to_string(), decimals: 2 },
+        ..CellFormat::default()
+    };
+    wb.sheets[0].set_cell(0, 0, CellData {
+        value: "1234.5".to_string(), formula: None, format: Some(euro.clone()), comment: None,
+        spill_anchor: None,
+    });
+    wb.sheets[0].set_row_height(0, 30);
+    // A tall row without cells is still written.
+    wb.sheets[0].set_row_height(4, 48);
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().with_extension("xlsx");
+    let path_str = path.to_str().unwrap();
+    save_xlsx(&wb, path_str).unwrap();
+    let mut extras = crate::infrastructure::xlsx_extras::read_extras(path_str).unwrap();
+    let sheet = extras.remove("Sheet1").expect("Sheet1 extras");
+    assert_eq!(sheet.row_heights, std::collections::HashMap::from([(0, 30), (4, 48)]));
+    assert_eq!(sheet.formats.get(&(0, 0)), Some(&euro));
+}

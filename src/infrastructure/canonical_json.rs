@@ -277,7 +277,7 @@ mod tests {
         let out = to_canonical_string(&Workbook::default()).unwrap();
         for key in [
             "iterative_calc", "iter_max", "iter_epsilon", "named_ranges", "rows", "cols",
-            "column_widths", "default_column_width", "conditional_formats", "tables", "view_state",
+            "column_widths", "default_column_width", "row_heights", "conditional_formats", "tables", "view_state",
         ] {
             assert!(!out.contains(&format!("\"{}\"", key)), "{} written: {}", key, out);
         }

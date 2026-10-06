@@ -22,6 +22,10 @@ pub struct Spreadsheet {
     /// Default width for columns without custom widths
     #[serde(default = "default_column_width", skip_serializing_if = "is_default_column_width")]
     pub default_column_width: usize,
+    /// Custom row heights in points (Excel's unit), for rows not at
+    /// `DEFAULT_ROW_HEIGHT`.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub row_heights: HashMap<usize, usize>,
     /// Named ranges resolvable inside formulas. Map keys are uppercase by
     /// convention. Synced from `Workbook::named_ranges` so per-sheet recalc
     /// can resolve names without needing workbook access.
@@ -72,6 +76,7 @@ impl Clone for Spreadsheet {
             cols: self.cols,
             column_widths: self.column_widths.clone(),
             default_column_width: self.default_column_width,
+            row_heights: self.row_heights.clone(),
             named_ranges: self.named_ranges.clone(),
             conditional_formats: self.conditional_formats.clone(),
             tables: self.tables.clone(),
@@ -192,6 +197,7 @@ impl Default for Spreadsheet {
             cols: default_cols(),
             column_widths: HashMap::new(),
             default_column_width: default_column_width(),
+            row_heights: HashMap::new(),
             named_ranges: HashMap::new(),
             conditional_formats: Vec::new(),
             tables: Vec::new(),
@@ -208,6 +214,10 @@ impl Spreadsheet {
     pub const MAX_ROWS: usize = 1_048_576;
     /// Excel's grid: the most columns a sheet can have (XFD).
     pub const MAX_COLS: usize = 16_384;
+    /// Height of a row without a custom height, in points (Excel's default).
+    pub const DEFAULT_ROW_HEIGHT: usize = 15;
+    /// Excel's tallest row, in points.
+    pub const MAX_ROW_HEIGHT: usize = 409;
 
     /// Grow the sheet so `(last_row, last_col)` is inside it, up to Excel's
     /// grid. Never shrinks. Returns whether that cell now fits.
@@ -245,6 +255,10 @@ impl Spreadsheet {
             *w = (*w).min(MAX_WIDTH);
         }
         self.column_widths.retain(|&c, _| c < MAX_COLS);
+        self.row_heights.retain(|&r, h| {
+            *h = (*h).clamp(1, Self::MAX_ROW_HEIGHT);
+            r < MAX_ROWS && *h != Self::DEFAULT_ROW_HEIGHT
+        });
         Ok(())
     }
 
@@ -683,6 +697,21 @@ impl Spreadsheet {
         self.column_widths.get(&col).copied().unwrap_or(self.default_column_width)
     }
 
+    /// Height of `row` in points.
+    pub fn get_row_height(&self, row: usize) -> usize {
+        self.row_heights.get(&row).copied().unwrap_or(Self::DEFAULT_ROW_HEIGHT)
+    }
+
+    /// Set `row`'s height in points; the default height removes the entry.
+    pub fn set_row_height(&mut self, row: usize, height: usize) {
+        let height = height.clamp(1, Self::MAX_ROW_HEIGHT);
+        if height == Self::DEFAULT_ROW_HEIGHT {
+            self.row_heights.remove(&row);
+        } else {
+            self.row_heights.insert(row, height);
+        }
+    }
+
     pub fn set_column_width(&mut self, col: usize, width: usize) {
         self.column_widths.insert(col, width);
     }
@@ -772,6 +801,7 @@ impl Spreadsheet {
 
         self.cells = new_cells;
         self.rows += 1;
+        self.row_heights = self.row_heights.drain().map(|(r, h)| (if r >= at { r + 1 } else { r }, h)).collect();
 
         // Adjust formula references in all cells
         let updates = {
@@ -827,6 +857,12 @@ impl Spreadsheet {
 
         self.cells = new_cells;
         if self.rows > 1 { self.rows -= 1; }
+        self.row_heights = self
+            .row_heights
+            .drain()
+            .filter(|&(r, _)| r != at)
+            .map(|(r, h)| (if r > at { r - 1 } else { r }, h))
+            .collect();
 
         // Adjust formula references
         let updates = {

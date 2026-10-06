@@ -395,8 +395,18 @@ fn build_styles_xml(styles: &[CellFormat]) -> String {
                 }
             }
             NumberFormat::Currency { symbol, decimals } => {
-                let code = format!("\"{}\"#,##0.{}", symbol, "0".repeat((*decimals).min(crate::domain::MAX_DECIMALS) as usize));
-                let code = if code.ends_with('.') { code.trim_end_matches('.').to_string() } else { code };
+                let digits = format!("#,##0.{}", "0".repeat((*decimals).min(crate::domain::MAX_DECIMALS) as usize));
+                let digits = digits.trim_end_matches('.');
+                // Excel applies its own locale's separators; only the
+                // symbol's side and spacing go into the code.
+                let notation = crate::domain::CurrencyNotation::for_symbol(symbol);
+                let sym = format!("\"{}\"", symbol.replace('"', ""));
+                let space = if notation.space { " " } else { "" };
+                let code = if notation.symbol_after {
+                    format!("{}{}{}", digits, space, sym)
+                } else {
+                    format!("{}{}{}", sym, space, digits)
+                };
                 if let Some(i) = numfmts.iter().position(|n| n == &code) {
                     164 + i as u32
                 } else {
@@ -651,9 +661,15 @@ pub fn save_xlsx(workbook: &Workbook, path: &str) -> Result<(), String> {
         for (&(r, c), cd) in &sheet.cells {
             rows.entry(r).or_default().push((c, cd));
         }
+        for &r in sheet.row_heights.keys() {
+            rows.entry(r).or_default();
+        }
         for (r, mut cells) in rows {
             cells.sort_by_key(|(c, _)| *c);
-            buf.push_str(&format!("<row r=\"{}\">", r + 1));
+            match sheet.row_heights.get(&r) {
+                Some(ht) => buf.push_str(&format!("<row r=\"{}\" ht=\"{}\" customHeight=\"1\">", r + 1, ht)),
+                None => buf.push_str(&format!("<row r=\"{}\">", r + 1)),
+            }
             for (c, cd) in cells {
                 let cell_ref = format!("{}{}", Spreadsheet::column_label(c), r + 1);
                 let is_num = cd.value.parse::<f64>().is_ok();

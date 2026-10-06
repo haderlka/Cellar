@@ -23,6 +23,30 @@ pub enum NumberFormat {
     Percentage { decimals: u32 },
 }
 
+impl NumberFormat {
+    /// Decimal places shown, or `None` for General.
+    pub fn decimals(&self) -> Option<u32> {
+        match self {
+            NumberFormat::General => None,
+            NumberFormat::Number { decimals, .. }
+            | NumberFormat::Currency { decimals, .. }
+            | NumberFormat::Percentage { decimals } => Some(*decimals),
+        }
+    }
+
+    /// The same format showing `n` decimal places. General becomes a plain
+    /// number format, as Excel's Increase Decimal does.
+    pub fn with_decimals(&self, n: u32) -> NumberFormat {
+        let decimals = n.min(MAX_DECIMALS);
+        match self {
+            NumberFormat::General => NumberFormat::Number { decimals, thousands_sep: false },
+            NumberFormat::Number { thousands_sep, .. } => NumberFormat::Number { decimals, thousands_sep: *thousands_sep },
+            NumberFormat::Currency { symbol, .. } => NumberFormat::Currency { symbol: symbol.clone(), decimals },
+            NumberFormat::Percentage { .. } => NumberFormat::Percentage { decimals },
+        }
+    }
+}
+
 /// Cell text/fill colour. A fixed 15-colour palette (inherited from
 /// tshts, where it mapped onto terminal colours); imported colours snap to
 /// the nearest entry.
@@ -172,17 +196,17 @@ pub fn format_cell_value(value: &str, format: &CellFormat) -> String {
         }
         NumberFormat::Currency { symbol, decimals } => {
             if let Ok(n) = value.parse::<f64>() {
-                // Excel convention: sign goes BEFORE the currency symbol
-                // ("-$42.50"), not between the symbol and the magnitude
-                // ("$-42.50"). Format the absolute value, then prepend
-                // the sign manually so the symbol always sits next to
-                // the digits.
+                // The sign goes before everything ("-$42.50", "-42.50 €"),
+                // never between the symbol and the digits.
+                let conv = CurrencyNotation::for_symbol(symbol);
                 let abs_formatted = format!("{:.prec$}", n.abs(), prec = (*decimals).min(MAX_DECIMALS) as usize);
                 let body = add_thousands_separator(&abs_formatted);
-                if n < 0.0 {
-                    format!("-{}{}", symbol, body)
-                } else {
-                    format!("{}{}", symbol, body)
+                let sign = if n < 0.0 && abs_formatted.bytes().any(|b| b.is_ascii_digit() && b != b'0') { "-" } else { "" };
+                match (conv.symbol_after, conv.space) {
+                    (true, true) => format!("{}{} {}", sign, body, symbol),
+                    (true, false) => format!("{}{}{}", sign, body, symbol),
+                    (false, true) => format!("{}{} {}", sign, symbol, body),
+                    (false, false) => format!("{}{}{}", sign, symbol, body),
                 }
             } else {
                 value.to_string()
@@ -194,6 +218,30 @@ pub fn format_cell_value(value: &str, format: &CellFormat) -> String {
             } else {
                 value.to_string()
             }
+        }
+    }
+}
+
+/// Where a currency's symbol goes, as its home countries write it:
+/// `1,234.56 €`, `$1,234.56`, `CHF 1,234.56`. Picked from the symbol, so a
+/// file shows the same on every machine. The digits always use `.` for
+/// decimals and `,` for thousands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurrencyNotation {
+    pub symbol_after: bool,
+    /// A space between the number and the symbol.
+    pub space: bool,
+}
+
+impl CurrencyNotation {
+    pub fn for_symbol(symbol: &str) -> Self {
+        let n = |symbol_after, space| Self { symbol_after, space };
+        match symbol.trim() {
+            "€" | "EUR" | "kr" | "kr." | "SEK" | "NOK" | "DKK" | "zł" | "PLN" | "Kč" | "CZK" | "₽" | "RUB" | "₴"
+            | "UAH" | "Ft" | "HUF" => n(true, true),
+            // Letter codes read better with a space: "CHF 1,234.56".
+            s if s.chars().last().is_some_and(|c| c.is_alphabetic()) => n(false, true),
+            _ => n(false, false),
         }
     }
 }
@@ -371,6 +419,32 @@ mod tests {
         assert_eq!(super::format_cell_value("1234.5", &fmt), "$1,234.50");
         assert_eq!(super::format_cell_value("42", &fmt), "$42.00");
         assert_eq!(super::format_cell_value("hello", &fmt), "hello");
+        assert_eq!(super::format_cell_value("-42.5", &fmt), "-$42.50");
+    }
+
+    #[test]
+    fn currency_follows_its_own_notation() {
+        let cur = |symbol: &str, decimals| CellFormat {
+            number_format: NumberFormat::Currency { symbol: symbol.to_string(), decimals },
+            ..CellFormat::default()
+        };
+        assert_eq!(format_cell_value("1234567.5", &cur("€", 2)), "1,234,567.50 €");
+        assert_eq!(format_cell_value("-42", &cur("€", 2)), "-42.00 €");
+        assert_eq!(format_cell_value("1234.6", &cur("€", 0)), "1,235 €");
+        assert_eq!(format_cell_value("1234.5", &cur("£", 2)), "£1,234.50");
+        assert_eq!(format_cell_value("1234.5", &cur("CHF", 2)), "CHF 1,234.50");
+        assert_eq!(format_cell_value("1234.5", &cur("zł", 2)), "1,234.50 zł");
+        // Rounds to zero: no "-0.00 €".
+        assert_eq!(format_cell_value("-0.001", &cur("€", 2)), "0.00 €");
+    }
+
+    #[test]
+    fn decimals_helpers() {
+        assert_eq!(NumberFormat::General.with_decimals(3), NumberFormat::Number { decimals: 3, thousands_sep: false });
+        let eur = NumberFormat::Currency { symbol: "€".into(), decimals: 2 };
+        assert_eq!(eur.with_decimals(0), NumberFormat::Currency { symbol: "€".into(), decimals: 0 });
+        assert_eq!(eur.decimals(), Some(2));
+        assert_eq!(NumberFormat::Percentage { decimals: 1 }.with_decimals(99).decimals(), Some(MAX_DECIMALS));
     }
 
     #[test]

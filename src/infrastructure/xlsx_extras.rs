@@ -25,6 +25,8 @@ pub struct SheetExtras {
     pub formats: HashMap<(usize, usize), CellFormat>,
     /// Column widths in characters, keyed by column index.
     pub column_widths: HashMap<usize, usize>,
+    /// Custom row heights in points, keyed by row index.
+    pub row_heights: HashMap<usize, usize>,
     pub charts: Vec<ChartSpec>,
     /// Pivot tables on this sheet: converted, or (name, reason) when they
     /// couldn't be.
@@ -493,6 +495,20 @@ fn parse_sheet(xml: &str, xfs: &[Option<CellFormat>], out: &mut SheetExtras) {
                     }
                 }
             }
+            b"row" => {
+                let row = attr(&e, b"r").and_then(|v| v.parse::<usize>().ok());
+                let ht = attr(&e, b"ht").and_then(|v| v.parse::<f64>().ok());
+                if attr(&e, b"customHeight").as_deref() == Some("1")
+                    && let (Some(row), Some(ht)) = (row, ht)
+                    && row >= 1
+                    && ht.is_finite()
+                {
+                    let pt = (ht.round() as usize).clamp(1, Spreadsheet::MAX_ROW_HEIGHT);
+                    if pt != Spreadsheet::DEFAULT_ROW_HEIGHT {
+                        out.row_heights.insert(row - 1, pt);
+                    }
+                }
+            }
             b"c" => {
                 let fmt = attr(&e, b"s")
                     .and_then(|s| s.parse::<usize>().ok())
@@ -755,12 +771,14 @@ mod tests {
         let xfs = vec![None, Some(CellFormat { style: CellStyle { bold: true, ..Default::default() }, ..Default::default() })];
         let xml = r#"<worksheet><cols><col min="1" max="2" width="15.7" customWidth="1"/>
             <col min="3" max="16384" width="9"/></cols>
-            <sheetData><row r="1"><c r="A1" s="1" t="s"><v>0</v></c><c r="B1" s="0"/></row></sheetData></worksheet>"#;
+            <sheetData><row r="1" ht="30" customHeight="1"><c r="A1" s="1" t="s"><v>0</v></c><c r="B1" s="0"/></row>
+            <row r="2" ht="15.75"/></sheetData></worksheet>"#;
         let mut out = SheetExtras::default();
         parse_sheet(xml, &xfs, &mut out);
         assert_eq!(out.column_widths.get(&0), Some(&16));
         assert_eq!(out.column_widths.get(&1), Some(&16));
         assert_eq!(out.column_widths.len(), 2, "the to-16384 default span is skipped");
+        assert_eq!(out.row_heights, HashMap::from([(0, 30)]), "only custom heights are read");
         assert!(out.formats.get(&(0, 0)).unwrap().style.bold);
         assert!(!out.formats.contains_key(&(0, 1)));
     }

@@ -462,3 +462,30 @@ fn sanitize_dimensions_makes_hand_edited_sizes_usable() {
     sheet.cells.insert((99_999_999, 0), CellData { value: "far".into(), ..CellData::default() });
     assert!(sheet.sanitize_dimensions().is_err());
 }
+
+#[test]
+fn row_heights_follow_inserted_and_deleted_rows() {
+    let mut sheet = Spreadsheet::default();
+    assert_eq!(sheet.get_row_height(4), Spreadsheet::DEFAULT_ROW_HEIGHT);
+    sheet.set_row_height(2, 30);
+    sheet.set_row_height(5, 45);
+    sheet.set_row_height(7, Spreadsheet::DEFAULT_ROW_HEIGHT);
+    assert_eq!(sheet.row_heights.len(), 2, "the default height is not stored");
+
+    sheet.insert_row(3);
+    assert_eq!((sheet.get_row_height(2), sheet.get_row_height(6)), (30, 45));
+    sheet.delete_row(2);
+    assert_eq!(sheet.row_heights.len(), 1);
+    assert_eq!(sheet.get_row_height(5), 45);
+}
+
+#[test]
+fn sanitize_clamps_row_heights() {
+    let mut sheet = Spreadsheet::default();
+    sheet.row_heights.insert(0, 100_000);
+    sheet.row_heights.insert(1, Spreadsheet::DEFAULT_ROW_HEIGHT);
+    sheet.row_heights.insert(Spreadsheet::MAX_ROWS, 20);
+    sheet.sanitize_dimensions().unwrap();
+    assert_eq!(sheet.row_heights.len(), 1);
+    assert_eq!(sheet.get_row_height(0), Spreadsheet::MAX_ROW_HEIGHT);
+}

@@ -189,6 +189,34 @@ impl App {
         self.status_message = Some(format!("Applied {} format to {} cell(s)", fmt_name, count));
     }
 
+    /// Show `decimals` decimal places in every selected cell. Number,
+    /// currency and percent formats keep their kind; General cells (even
+    /// empty ones, ready for numbers typed later) become plain numbers.
+    /// Bold, colours and the currency symbol are kept.
+    pub fn set_selection_decimals(&mut self, decimals: u32) {
+        let decimals = decimals.min(MAX_DECIMALS);
+        let cells: Vec<(usize, usize, CellData)> = self
+            .selection_cells()
+            .into_iter()
+            .filter_map(|(r, c)| {
+                let mut cell = self.workbook.current_sheet().get_cell(r, c);
+                let mut fmt = cell.format.clone().unwrap_or_default();
+                let number_format = fmt.number_format.with_decimals(decimals);
+                if number_format == fmt.number_format {
+                    return None;
+                }
+                fmt.number_format = number_format;
+                cell.format = Some(fmt);
+                Some((r, c, cell))
+            })
+            .collect();
+        let count = cells.len();
+        if count > 0 {
+            self.set_many_with_undo(cells);
+        }
+        self.status_message = Some(format!("{} decimal place(s) in {} cell(s)", decimals, count));
+    }
+
     pub fn toggle_bold(&mut self) {
         let first = self.workbook.current_sheet().get_cell(self.selected_row, self.selected_col);
         let new_bold = !first.format.as_ref().map(|f| f.style.bold).unwrap_or(false);
@@ -614,4 +642,34 @@ mod tests {
         assert_eq!(app.workbook.current_sheet().get_cell(0, 0).comment, None);
     }
 
+
+    #[test]
+    fn set_decimals_applies_to_every_selected_cell() {
+        use crate::domain::CellStyle;
+        let mut app = App::default();
+        let num = |v: &str| CellData { value: v.to_string(), formula: None, format: None, comment: None, spill_anchor: None };
+        app.set_cell_with_undo(0, 0, num("1.5"));
+        app.set_cell_with_undo(2, 0, CellData {
+            format: Some(CellFormat {
+                number_format: NumberFormat::Currency { symbol: "€".into(), decimals: 2 },
+                style: CellStyle { bold: true, ..CellStyle::default() },
+            }),
+            ..num("3")
+        });
+        app.selection_start = Some((0, 0));
+        app.selection_end = Some((2, 0));
+
+        app.set_selection_decimals(4);
+        let sheet = app.workbook.current_sheet();
+        let nf = |r: usize| sheet.get_cell(r, 0).format.map(|f| f.number_format);
+        assert_eq!(nf(0), Some(NumberFormat::Number { decimals: 4, thousands_sep: false }));
+        assert_eq!(nf(1), Some(NumberFormat::Number { decimals: 4, thousands_sep: false }), "empty cells too");
+        assert_eq!(nf(2), Some(NumberFormat::Currency { symbol: "€".into(), decimals: 4 }));
+        assert!(sheet.get_cell(2, 0).format.unwrap().style.bold, "style is kept");
+
+        app.undo();
+        let sheet = app.workbook.current_sheet();
+        assert_eq!(sheet.get_cell(2, 0).format.unwrap().number_format.decimals(), Some(2));
+        assert_eq!(sheet.get_cell(0, 0).format, None);
+    }
 }

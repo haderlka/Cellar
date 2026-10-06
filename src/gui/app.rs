@@ -71,6 +71,8 @@ pub struct GuiApp {
     structure_dialog: Option<(bool, bool)>,
     allow_close: bool,
     window_title: String,
+    /// Value of Format → Decimal places (2 until the user changes it).
+    decimal_places: u32,
 }
 
 impl GuiApp {
@@ -92,6 +94,7 @@ impl GuiApp {
             structure_dialog: None,
             allow_close: false,
             window_title: String::new(),
+            decimal_places: 2,
         };
         if let Some(path) = file {
             gui.open_path(PathBuf::from(path));
@@ -803,6 +806,7 @@ impl GuiApp {
                 }
             }
         });
+        self.decimal_places(ui);
         ui.menu_button("Text Color", |ui| self.color_choices(ui, false));
         ui.menu_button("Fill Color", |ui| self.color_choices(ui, true));
         ui.separator();
@@ -1155,11 +1159,17 @@ impl GuiApp {
                 None => self.cell_input_text(row, col),
             };
             let id = egui::Id::new(FORMULA_BAR_ID);
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let color = ui.visuals().text_color();
+            let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+                ui.fonts_mut(|f| f.layout_job(crate::grid::formula_layout_job(buf.as_str(), font.clone(), color)))
+            };
             let resp = ui.add(
                 TextEdit::singleline(&mut shown)
                     .id(id)
                     .desired_width(f32::INFINITY)
                     .font(egui::TextStyle::Monospace)
+                    .layouter(&mut layouter)
                     .hint_text("Value or =formula"),
             );
             if resp.gained_focus() {
@@ -1191,6 +1201,19 @@ impl GuiApp {
                 e.focus_pending = false;
                 resp.request_focus();
                 move_caret_to_end(ui.ctx(), id, e.text.chars().count());
+            }
+        });
+    }
+
+    /// "Decimal places: [n] Apply", like Excel's Format Cells: sets the
+    /// number of decimals for every selected cell.
+    fn decimal_places(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Decimal places:");
+            ui.add(egui::DragValue::new(&mut self.decimal_places).range(0..=cellar::domain::MAX_DECIMALS).speed(0.05));
+            if ui.button("Apply").clicked() {
+                self.app.set_selection_decimals(self.decimal_places);
+                ui.close();
             }
         });
     }
@@ -1403,8 +1426,8 @@ pub fn number_formats() -> Vec<(&'static str, NumberFormat)> {
         ("Number (1234.56)", NumberFormat::Number { decimals: 2, thousands_sep: false }),
         ("Number (1,234.56)", NumberFormat::Number { decimals: 2, thousands_sep: true }),
         ("Integer (1,235)", NumberFormat::Number { decimals: 0, thousands_sep: true }),
-        ("Currency ($)", NumberFormat::Currency { symbol: "$".into(), decimals: 2 }),
-        ("Currency (€)", NumberFormat::Currency { symbol: "€".into(), decimals: 2 }),
+        ("Currency ($1,234.56)", NumberFormat::Currency { symbol: "$".into(), decimals: 2 }),
+        ("Currency (1,234.56 €)", NumberFormat::Currency { symbol: "€".into(), decimals: 2 }),
         ("Percent (12%)", NumberFormat::Percentage { decimals: 0 }),
         ("Percent (12.34%)", NumberFormat::Percentage { decimals: 2 }),
     ]

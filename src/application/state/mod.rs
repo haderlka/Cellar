@@ -3,7 +3,10 @@
 //! The GUI (`src/gui/`) reads and drives this state; everything that
 //! changes the workbook goes through methods here so it is undoable.
 
-use crate::domain::{Spreadsheet, Workbook, CellData, CellFormat, NumberFormat, TerminalColor, FormulaEvaluator};
+use crate::domain::{
+    CellData, CellFormat, FormulaEvaluator, NumberFormat, Spreadsheet, TerminalColor, Workbook,
+    MAX_DECIMALS,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 

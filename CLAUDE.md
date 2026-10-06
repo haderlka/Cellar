@@ -28,7 +28,8 @@ Do not commit or push; the maintainer reviews changes first.
 src/
 ├── domain/                  # pure logic, no I/O (see Layer dependencies)
 │   ├── models/              # Spreadsheet, Workbook, CellData, CellStyle/CellFormat, ChartSpec,
-│   │                        #   PivotSpec (pivot.rs), WorkbookGraph (dep_graph.rs), refs
+│   │                        #   PivotSpec (pivot.rs), WorkbookGraph (dep_graph.rs), refs,
+│   │                        #   formula_refs.rs (references + positions in formula text)
 │   ├── parser/              # formula lexer, recursive-descent parser, AST evaluator,
 │   │   └── registry_fns/    #   built-in functions by category (numeric, string, date, …)
 │   └── services/            # FormulaEvaluator, recalc executors, CsvExporter,

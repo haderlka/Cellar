@@ -7,7 +7,8 @@ use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Stroke,
     StrokeKind, TextEdit, Ui,
 };
-use cellar::domain::{format_cell_value, CellData, CellStyle, Spreadsheet, TerminalColor};
+use eframe::egui::text::{LayoutJob, TextFormat};
+use cellar::domain::{format_cell_value, formula_references, CellData, CellStyle, FormulaRef, Spreadsheet, TerminalColor};
 
 use cellar::application::{fill_target, CellRange, FillMode, FillTarget};
 
@@ -23,6 +24,61 @@ pub const CELL_EDITOR_ID: &str = "cell_editor";
 
 pub fn col_px(chars: usize) -> f32 {
     (chars as f32 * CHAR_W + 10.0).max(24.0)
+}
+
+/// Pixels of a row `pt` points tall; the default 15 pt row is `ROW_H`.
+pub fn row_px(pt: usize) -> f32 {
+    (pt as f32 * ROW_H / Spreadsheet::DEFAULT_ROW_HEIGHT as f32).max(4.0)
+}
+
+fn px_to_pt(px: f32) -> usize {
+    (px * Spreadsheet::DEFAULT_ROW_HEIGHT as f32 / ROW_H).round().max(2.0) as usize
+}
+
+/// Colours of the references in a formula, in order of appearance (as
+/// Excel cycles blue, red, purple, green…). Readable on both themes.
+const REF_COLORS: [Color32; 8] = [
+    Color32::from_rgb(52, 120, 246),
+    Color32::from_rgb(220, 60, 60),
+    Color32::from_rgb(150, 80, 200),
+    Color32::from_rgb(30, 150, 80),
+    Color32::from_rgb(225, 120, 20),
+    Color32::from_rgb(0, 150, 170),
+    Color32::from_rgb(200, 50, 150),
+    Color32::from_rgb(140, 110, 40),
+];
+
+/// The references in `formula`, each with its colour. A reference that
+/// appears twice keeps one colour.
+pub fn colored_refs(formula: &str) -> Vec<(FormulaRef, Color32)> {
+    let mut seen: Vec<(Option<String>, CellRange)> = Vec::new();
+    formula_references(formula)
+        .into_iter()
+        .map(|r| {
+            let key = (r.sheet.as_ref().map(|s| s.to_lowercase()), r.range);
+            let i = seen.iter().position(|k| *k == key).unwrap_or_else(|| {
+                seen.push(key);
+                seen.len() - 1
+            });
+            (r, REF_COLORS[i % REF_COLORS.len()])
+        })
+        .collect()
+}
+
+/// `text` laid out with its references coloured, for the cell editor and
+/// the formula bar. Text that isn't a formula is laid out plainly.
+pub fn formula_layout_job(text: &str, font: FontId, color: Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let mut pos = 0;
+    if text.starts_with('=') {
+        for (r, ref_color) in colored_refs(text) {
+            job.append(&text[pos..r.span.start], 0.0, TextFormat::simple(font.clone(), color));
+            job.append(&text[r.span.clone()], 0.0, TextFormat::simple(font.clone(), ref_color));
+            pos = r.span.end;
+        }
+    }
+    job.append(&text[pos..], 0.0, TextFormat::simple(font, color));
+    job
 }
 
 #[derive(Default)]
@@ -59,6 +115,7 @@ enum Drag {
     Rows { anchor: usize },
     Cols { anchor: usize },
     Resize { col: usize, start_px: f32, start_x: f32 },
+    RowResize { row: usize, start_px: f32, start_y: f32 },
     /// Clicking cells while typing a formula inserts references.
     RefPick { anchor: (usize, usize), current: (usize, usize) },
     /// Dragging the fill handle of `source` towards `end`.
@@ -71,6 +128,8 @@ enum Hit {
     ColHeader(usize),
     ColBorder(usize),
     RowHeader(usize),
+    /// The bottom edge of a row header.
+    RowBorder(usize),
     Cell(usize, usize),
     FillHandle,
 }
@@ -84,6 +143,12 @@ struct Layout {
     /// nothing is hidden and display index == row.
     visible_rows: Option<Vec<usize>>,
     rows: usize,
+    /// Shown rows with a custom height, as (display index, pixels),
+    /// sorted. Every other row is `ROW_H` tall.
+    tall: Vec<(usize, f32)>,
+    /// `extra[k]`: how much taller than `ROW_H` the rows `tall[..k]` are
+    /// together; `extra[tall.len()]` is the total.
+    extra: Vec<f32>,
 }
 
 impl Layout {
@@ -99,7 +164,71 @@ impl Layout {
         col_x.push(x);
         let visible_rows = (!gui.app.hidden_rows.is_empty())
             .then(|| (0..sheet.rows).filter(|r| !gui.app.hidden_rows.contains(r)).collect());
-        Self { col_x, visible_rows, rows: sheet.rows }
+        let mut layout = Self { col_x, visible_rows, rows: sheet.rows, tall: Vec::new(), extra: vec![0.0] };
+        let mut tall: Vec<(usize, f32)> = sheet
+            .row_heights
+            .iter()
+            .filter_map(|(&r, &pt)| Some((layout.index_of(r)?, row_px(pt))))
+            .collect();
+        tall.sort_by_key(|&(idx, _)| idx);
+        let mut sum = 0.0;
+        for &(_, h) in &tall {
+            sum += h - ROW_H;
+            layout.extra.push(sum);
+        }
+        layout.tall = tall;
+        layout
+    }
+
+    /// Top of display row `idx`, relative to the body (`idx` may be
+    /// `row_count()`, giving the total height).
+    fn row_y(&self, idx: usize) -> f32 {
+        let k = self.tall.partition_point(|&(i, _)| i < idx);
+        idx as f32 * ROW_H + self.extra[k]
+    }
+
+    fn row_h(&self, idx: usize) -> f32 {
+        match self.tall.binary_search_by_key(&idx, |&(i, _)| i) {
+            Ok(k) => self.tall[k].1,
+            Err(_) => ROW_H,
+        }
+    }
+
+    /// Display row at body-relative y (clamped).
+    fn row_idx_at(&self, y: f32) -> usize {
+        let y = y.max(0.0);
+        let top = |k: usize| self.tall[k].0 as f32 * ROW_H + self.extra[k];
+        // Number of tall rows starting at or above y.
+        let (mut lo, mut hi) = (0, self.tall.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if top(mid) <= y { lo = mid + 1 } else { hi = mid }
+        }
+        let idx = match lo.checked_sub(1) {
+            None => (y / ROW_H) as usize,
+            Some(k) => {
+                let (i, h) = self.tall[k];
+                let top = i as f32 * ROW_H + self.extra[k];
+                if y < top + h { i } else { i + 1 + ((y - top - h) / ROW_H) as usize }
+            }
+        };
+        idx.min(self.row_count().saturating_sub(1))
+    }
+
+    fn height(&self) -> f32 {
+        self.row_y(self.row_count())
+    }
+
+    /// First and last shown display rows within `r0..=r1`.
+    fn display_span(&self, r0: usize, r1: usize) -> Option<(usize, usize)> {
+        match &self.visible_rows {
+            None => (r0 < self.rows).then(|| (r0, r1.min(self.rows - 1))),
+            Some(v) => {
+                let a = v.partition_point(|&r| r < r0);
+                let b = v.partition_point(|&r| r <= r1);
+                (a < b).then(|| (a, b - 1))
+            }
+        }
     }
 
     fn row_count(&self) -> usize {
@@ -133,6 +262,14 @@ impl Layout {
     fn width(&self) -> f32 {
         *self.col_x.last().unwrap_or(&0.0)
     }
+
+    /// Screen rect of display row `row_idx`, column `col`.
+    fn cell_rect(&self, origin: Pos2, row_idx: usize, col: usize) -> Rect {
+        Rect::from_min_size(
+            pos2(origin.x + ROW_HEADER_W + self.col_x[col], origin.y + HEADER_H + self.row_y(row_idx)),
+            vec2(self.col_x[col + 1] - self.col_x[col], self.row_h(row_idx)),
+        )
+    }
 }
 
 impl GuiApp {
@@ -142,7 +279,7 @@ impl GuiApp {
         let layout = Layout::new(self.app.workbook.current_sheet(), self);
         let content = vec2(
             ROW_HEADER_W + layout.width(),
-            HEADER_H + layout.row_count() as f32 * ROW_H,
+            HEADER_H + layout.height(),
         );
 
         egui::ScrollArea::both()
@@ -152,15 +289,7 @@ impl GuiApp {
                 ui.set_min_size(content);
                 let origin = ui.min_rect().min;
                 let screen = viewport.translate(origin.to_vec2());
-                let cell_rect = |row_idx: usize, col: usize| {
-                    Rect::from_min_size(
-                        pos2(
-                            origin.x + ROW_HEADER_W + layout.col_x[col],
-                            origin.y + HEADER_H + row_idx as f32 * ROW_H,
-                        ),
-                        vec2(layout.col_x[col + 1] - layout.col_x[col], ROW_H),
-                    )
-                };
+                let cell_rect = |row_idx: usize, col: usize| layout.cell_rect(origin, row_idx, col);
 
                 // Keep the cursor visible after keyboard moves. Expand the
                 // target by the header size so it isn't hidden under them.
@@ -355,8 +484,8 @@ impl GuiApp {
         }
         let c0 = layout.col_at(viewport.min.x - ROW_HEADER_W);
         let c1 = layout.col_at(viewport.max.x - ROW_HEADER_W);
-        let r0 = ((viewport.min.y - HEADER_H).max(0.0) / ROW_H) as usize;
-        let r1 = ((viewport.max.y / ROW_H).ceil() as usize + 1).min(layout.row_count());
+        let r0 = layout.row_idx_at(viewport.min.y - HEADER_H);
+        let r1 = (layout.row_idx_at(viewport.max.y) + 2).min(layout.row_count());
 
         // Cells.
         for idx in r0..r1 {
@@ -384,7 +513,7 @@ impl GuiApp {
             painter.vline(x, body_top..=screen.max.y, Stroke::new(1.0, grid_line));
         }
         for idx in r0..=r1 {
-            let y = origin.y + HEADER_H + idx as f32 * ROW_H;
+            let y = origin.y + HEADER_H + layout.row_y(idx);
             painter.hline(body_left..=screen.max.x, y, Stroke::new(1.0, grid_line));
         }
 
@@ -403,6 +532,12 @@ impl GuiApp {
             let blue = Color32::from_rgb(40, 110, 230);
             body.rect_filled(rect, 0.0, blue.gamma_multiply(0.12));
             body.rect_stroke(rect, 0.0, Stroke::new(1.5, blue), StrokeKind::Inside);
+        }
+        for (range, color) in self.formula_highlights(layout) {
+            if let Some(rect) = range_rect(range.0, range.1) {
+                body.rect_filled(rect, 0.0, color.gamma_multiply(0.10));
+                body.rect_stroke(rect, 0.0, Stroke::new(1.5, color), StrokeKind::Inside);
+            }
         }
         if let Some(idx) = layout.index_of(self.app.selected_row)
             && self.app.selected_col < layout.cols()
@@ -439,12 +574,12 @@ impl GuiApp {
         let rp = painter.with_clip_rect(Rect::from_min_max(pos2(screen.min.x, body_top), screen.max));
         for idx in r0..r1 {
             let row = layout.row_at(idx);
-            let y0 = origin.y + HEADER_H + idx as f32 * ROW_H;
-            let r = Rect::from_min_size(pos2(screen.min.x, y0), vec2(ROW_HEADER_W, ROW_H));
+            let y0 = origin.y + HEADER_H + layout.row_y(idx);
+            let r = Rect::from_min_size(pos2(screen.min.x, y0), vec2(ROW_HEADER_W, layout.row_h(idx)));
             if (sr0..=sr1).contains(&row) {
                 rp.rect_filled(r, 0.0, header_hl);
             }
-            rp.hline(r.x_range(), y0 + ROW_H, Stroke::new(1.0, grid_line));
+            rp.hline(r.x_range(), r.max.y, Stroke::new(1.0, grid_line));
             rp.text(r.center(), Align2::CENTER_CENTER, (row + 1).to_string(), header_font.clone(), text);
         }
         let corner = Rect::from_min_size(screen.min, vec2(ROW_HEADER_W, HEADER_H));
@@ -457,19 +592,14 @@ impl GuiApp {
         let in_header_row = p.y < screen.min.y + HEADER_H;
         let in_header_col = p.x < screen.min.x + ROW_HEADER_W;
         if !in_header_row && !in_header_col {
-            let cell_rect = |row_idx: usize, col: usize| {
-                Rect::from_min_size(
-                    pos2(origin.x + ROW_HEADER_W + layout.col_x[col], origin.y + HEADER_H + row_idx as f32 * ROW_H),
-                    vec2(layout.col_x[col + 1] - layout.col_x[col], ROW_H),
-                )
-            };
+            let cell_rect = |row_idx: usize, col: usize| layout.cell_rect(origin, row_idx, col);
             if self.handle_rect(layout, &cell_rect).is_some_and(|h| h.expand(3.0).contains(p)) {
                 return Hit::FillHandle;
             }
         }
         let bx = p.x - origin.x - ROW_HEADER_W;
         let by = p.y - origin.y - HEADER_H;
-        let row_idx = ((by / ROW_H).max(0.0) as usize).min(layout.row_count().saturating_sub(1));
+        let row_idx = layout.row_idx_at(by);
         match (in_header_row, in_header_col) {
             (true, true) => Hit::Corner,
             (true, false) => {
@@ -483,7 +613,17 @@ impl GuiApp {
                     Hit::ColHeader(col)
                 }
             }
-            (false, true) => Hit::RowHeader(layout.row_at(row_idx)),
+            (false, true) => {
+                // Grab the border within 3px of a row edge.
+                let top = layout.row_y(row_idx);
+                if (top + layout.row_h(row_idx) - by).abs() <= 3.0 {
+                    Hit::RowBorder(layout.row_at(row_idx))
+                } else if row_idx > 0 && (by - top).abs() <= 3.0 {
+                    Hit::RowBorder(layout.row_at(row_idx - 1))
+                } else {
+                    Hit::RowHeader(layout.row_at(row_idx))
+                }
+            }
             (false, false) => Hit::Cell(layout.row_at(row_idx), layout.col_at(bx)),
         }
     }
@@ -514,6 +654,9 @@ impl GuiApp {
         if hovering && matches!(hit, Hit::ColBorder(_)) || matches!(self.grid.drag, Some(Drag::Resize { .. })) {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
+        if hovering && matches!(hit, Hit::RowBorder(_)) || matches!(self.grid.drag, Some(Drag::RowResize { .. })) {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeVertical);
+        }
         if hovering && hit == Hit::FillHandle || matches!(self.grid.drag, Some(Drag::Fill { .. })) {
             ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
         }
@@ -543,7 +686,7 @@ impl GuiApp {
             } else if pos.x < screen.min.x + ROW_HEADER_W {
                 delta.x = 40.0;
             }
-            if delta != vec2(0.0, 0.0) && !matches!(drag, Drag::Resize { .. }) {
+            if delta != vec2(0.0, 0.0) && !matches!(drag, Drag::Resize { .. } | Drag::RowResize { .. }) {
                 ui.scroll_with_delta(delta);
             }
         }
@@ -557,7 +700,16 @@ impl GuiApp {
                 Hit::Cell(..) if self.edit.is_none() => self.start_edit(None, true),
                 Hit::FillHandle => self.fill_down_to_neighbour(),
                 Hit::ColBorder(col) => {
-                    self.app.workbook.current_sheet_mut().auto_resize_column(col);
+                    for c in self.resize_targets(col, false) {
+                        self.app.workbook.current_sheet_mut().auto_resize_column(c);
+                    }
+                    self.app.dirty = true;
+                }
+                // Text is one line, so AutoFit is the default height.
+                Hit::RowBorder(row) => {
+                    for r in self.resize_targets(row, true) {
+                        self.app.workbook.current_sheet_mut().set_row_height(r, Spreadsheet::DEFAULT_ROW_HEIGHT);
+                    }
                     self.app.dirty = true;
                 }
                 _ => {}
@@ -610,11 +762,66 @@ impl GuiApp {
                 let start_px = layout.col_x[col + 1] - layout.col_x[col];
                 self.grid.drag = Some(Drag::Resize { col, start_px, start_x: f32::NAN });
             }
+            Hit::RowBorder(row) => {
+                let start_px = layout.index_of(row).map_or(ROW_H, |idx| layout.row_h(idx));
+                self.grid.drag = Some(Drag::RowResize { row, start_px, start_y: f32::NAN });
+            }
             Hit::FillHandle => {
                 let source = self.selection_or_cursor();
                 self.grid.drag = Some(Drag::Fill { source, end: source.1 });
             }
         }
+    }
+
+    /// Rows (or columns) a border drag on `index` resizes: every selected
+    /// whole row (column) when `index` is one of them, as in Excel.
+    fn resize_targets(&self, index: usize, rows: bool) -> std::ops::RangeInclusive<usize> {
+        let sheet = self.app.workbook.current_sheet();
+        if let Some(((r0, c0), (r1, c1))) = self.app.get_selection_range() {
+            let whole_rows = c0 == 0 && c1 + 1 >= sheet.cols;
+            let whole_cols = r0 == 0 && r1 + 1 >= sheet.rows;
+            // Capped: Select All on a big sheet shouldn't store a million heights.
+            if rows && whole_rows && (r0..=r1).contains(&index) {
+                return r0..=r1.min(r0 + 10_000);
+            }
+            if !rows && whole_cols && (c0..=c1).contains(&index) {
+                return c0..=c1;
+            }
+        }
+        index..=index
+    }
+
+    /// Ranges on the shown sheet that the formula being edited (or the
+    /// cursor cell's formula) reads, each with its reference colour.
+    fn formula_highlights(&self, layout: &Layout) -> Vec<(CellRange, Color32)> {
+        let wb = &self.app.workbook;
+        let (formula, home) = match &self.edit {
+            Some(e) if e.text.starts_with('=') => (e.text.as_str(), e.sheet),
+            Some(_) => return Vec::new(),
+            None => match wb
+                .current_sheet()
+                .cells
+                .get(&(self.app.selected_row, self.app.selected_col))
+                .and_then(|c| c.formula.as_deref())
+            {
+                Some(f) => (f, wb.active_sheet),
+                None => return Vec::new(),
+            },
+        };
+        let shown = &wb.sheet_names[wb.active_sheet];
+        let last_col = layout.cols().saturating_sub(1);
+        colored_refs(formula)
+            .into_iter()
+            .filter(|(r, _)| match &r.sheet {
+                None => home == wb.active_sheet,
+                Some(name) => name.eq_ignore_ascii_case(shown),
+            })
+            .filter_map(|(r, color)| {
+                let ((r0, c0), (r1, c1)) = r.range;
+                let (a, b) = layout.display_span(r0, r1)?;
+                (c0 <= last_col).then(|| (((layout.row_at(a), c0), (layout.row_at(b), c1.min(last_col))), color))
+            })
+            .collect()
     }
 
     /// Double-click on the fill handle: fill down as far as the data in
@@ -654,7 +861,7 @@ impl GuiApp {
             Hit::Cell(r, c) => Some((r, c)),
             Hit::FillHandle => None,
             Hit::ColHeader(c) | Hit::ColBorder(c) => Some((self.app.selected_row, c)),
-            Hit::RowHeader(r) => Some((r, self.app.selected_col)),
+            Hit::RowHeader(r) | Hit::RowBorder(r) => Some((r, self.app.selected_col)),
             Hit::Corner => None,
         };
         match drag {
@@ -697,14 +904,26 @@ impl GuiApp {
                 }
                 let px = (start_px + pos.x - start_x).max(20.0);
                 let chars = ((px - 10.0) / CHAR_W).round().max(1.0) as usize;
-                self.app.workbook.current_sheet_mut().set_column_width(col, chars);
+                for c in self.resize_targets(col, false) {
+                    self.app.workbook.current_sheet_mut().set_column_width(c, chars);
+                }
+            }
+            Drag::RowResize { row, start_px, start_y } => {
+                if start_y.is_nan() {
+                    self.grid.drag = Some(Drag::RowResize { row, start_px, start_y: pos.y });
+                    return;
+                }
+                let pt = px_to_pt(start_px + pos.y - start_y);
+                for r in self.resize_targets(row, true) {
+                    self.app.workbook.current_sheet_mut().set_row_height(r, pt);
+                }
             }
         }
     }
 
     fn on_release(&mut self, drag: Drag, toggle_mode: bool) {
         match drag {
-            Drag::Resize { .. } => self.app.dirty = true,
+            Drag::Resize { .. } | Drag::RowResize { .. } => self.app.dirty = true,
             Drag::Fill { source, end } => match fill_target(source, end) {
                 Some(FillTarget::Fill(t)) => {
                     let mode = self.drag_fill_mode(source, toggle_mode);
@@ -780,11 +999,15 @@ impl GuiApp {
         let text_w = ui.fonts_mut(|f| f.layout_no_wrap(edit.text.clone(), font.clone(), Color32::WHITE).size().x);
         let rect = Rect::from_min_size(rect.min, vec2(rect.width().max(text_w + 16.0), rect.height()));
         let id = egui::Id::new(CELL_EDITOR_ID);
+        let color = ui.visuals().text_color();
+        let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
+            ui.fonts_mut(|f| f.layout_job(formula_layout_job(buf.as_str(), font.clone(), color)))
+        };
         let resp = ui.put(
             rect,
             TextEdit::singleline(&mut edit.text)
                 .id(id)
-                .font(font)
+                .layouter(&mut layouter)
                 .margin(vec2(3.0, 2.0))
                 .desired_width(rect.width()),
         );
@@ -865,7 +1088,8 @@ fn draw_cell(
     } else {
         rect.min.x + 4.0
     };
-    let pos = pos2(x, rect.center().y - size.y / 2.0);
+    // Bottom-aligned like Excel: tall rows keep the text on their last line.
+    let pos = pos2(x, rect.max.y - (ROW_H + size.y) / 2.0);
     let clip = painter.with_clip_rect(rect.shrink(1.0).intersect(painter.clip_rect()));
     if style.bold {
         // egui's default font has no bold face; overdraw for weight.

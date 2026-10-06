@@ -47,11 +47,16 @@ workbook in a `.cellar` file:
 ## Features
 
 **Spreadsheet**
-- Grid with mouse selection, column resizing, a formula bar and a name box
+- Grid with mouse selection, column and row resizing, a formula bar and a name box
   (type `B12` or `A1:C5` to jump/select), sheet tabs, undo/redo, and
   copy/paste that adjusts formulas and works with other apps.
 - About 160 Excel-compatible functions, dynamic arrays (`=SORT(A2:A9)`
   spills), `LET`/`LAMBDA`, cross-sheet references, named ranges.
+- Selecting or editing a formula outlines the cells it reads, each
+  reference in its own colour, as in Excel.
+- Number formats with a settable number of decimal places (Format →
+  Decimal places); the currency symbol sits where its countries put it
+  (`1,234.56 €`, `$1,234.56`).
 - While typing a formula, click or drag cells to insert references. Click
   another sheet's tab to pick cells there (`Sheet2!B4`); Enter takes you
   back to the formula's cell.
@@ -89,7 +94,7 @@ workbook in a `.cellar` file:
 
 **Excel**
 - *File → Import → Excel workbook…* brings over values, formulas, sheets,
-  named ranges, number formats, bold/underline, colours, column widths,
+  named ranges, number formats, bold/underline, colours, column widths, row heights,
   charts, PivotTables (as live PivotTables) and PivotCharts.
 - Every formula is then recalculated by Cellar and compared with the value
   Excel had saved. The import report lists any differences (usually a
@@ -234,7 +239,7 @@ create a circular reference are rejected.
 
 A `.cellar` file is JSON written in a canonical layout: keys sorted, cells
 sorted by position, one line per cell, default fields omitted. A workbook
-holds its sheets; each sheet has its `cells`, column widths, and — when
+holds its sheets; each sheet has its `cells`, column widths, row heights, and — when
 present — `pivots` and `charts`:
 
 ```json
