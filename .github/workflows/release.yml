@@ -26,8 +26,8 @@ jobs:
       run: |
         $v = "${{ github.ref_name }}"
         New-Item -ItemType Directory dist | Out-Null
-        Copy-Item target/release/cellar.exe "dist/cellar-$v-windows-x64.exe"
-        Compress-Archive -Path target/release/cellar.exe, README.md, LICENSE `
+        Copy-Item _out/release/cellar.exe "dist/cellar-$v-windows-x64.exe"
+        Compress-Archive -Path _out/release/cellar.exe, README.md, LICENSE `
           -DestinationPath "dist/cellar-$v-windows-x64.zip"
     - uses: actions/upload-artifact@v4
       with:
@@ -52,8 +52,8 @@ jobs:
 
         # One universal binary that runs on both Apple Silicon and Intel.
         lipo -create -output "$APP/Contents/MacOS/cellar" \
-          target/aarch64-apple-darwin/release/cellar \
-          target/x86_64-apple-darwin/release/cellar
+          _out/aarch64-apple-darwin/release/cellar \
+          _out/x86_64-apple-darwin/release/cellar
 
         # App icon from the rendered logo.
         mkdir Cellar.iconset
@@ -153,7 +153,7 @@ jobs:
       run: |
         NAME=cellar-${{ github.ref_name }}-linux-x64
         mkdir -p "$NAME" dist
-        cp target/release/cellar README.md LICENSE assets/icon-256.png "$NAME/"
+        cp _out/release/cellar README.md LICENSE assets/icon-256.png "$NAME/"
         tar czf "dist/$NAME.tar.gz" "$NAME"
     - uses: actions/upload-artifact@v4
       with:

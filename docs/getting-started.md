@@ -42,7 +42,7 @@ cargo run --release
 ```
 
 The first build takes a few minutes. Afterwards start
-`target/release/cellar` (`cellar.exe` on Windows) directly.
+`_out/release/cellar` (`cellar.exe` on Windows) directly.
 
 - **Windows** needs the Visual Studio C++ Build Tools.
 - **Linux** needs the usual GUI development packages, for example on

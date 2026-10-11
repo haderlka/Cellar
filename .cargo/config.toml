@@ -1,0 +1,4 @@
+# Build output (cargo build, run, test, clippy, bench) goes to _out instead
+# of the default target folder. Cargo creates the folder when it is missing.
+[build]
+target-dir = "_out"

@@ -181,7 +181,7 @@ cargo run --release
 ```
 
 The first build takes a few minutes. Afterwards start
-`target/release/cellar` (`cellar.exe` on Windows) directly.
+`_out/release/cellar` (`cellar.exe` on Windows) directly.
 
 Platform notes:
 - **macOS** — nothing else is needed.

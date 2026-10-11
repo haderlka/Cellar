@@ -1,3 +1,5 @@
+/_out
+# The default folder, from builds made before _out was configured.
 /target
 # Scratch workbooks from local testing — keep test fixtures elsewhere.
 /*.cellar
