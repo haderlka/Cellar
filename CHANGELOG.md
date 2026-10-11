@@ -1,5 +1,73 @@
 # Changelog
 
+## Cellar 0.2.0 — 2026-10-11
+
+Tables, conditional formatting, data tools, formula help, frozen panes and
+a user guide. Files from 0.1.3 open unchanged. A workbook that contains a
+conditional format can't be opened by 0.1.3 once 0.2.0 has saved it.
+
+### Added
+
+- **Conditional formatting** (Format → Conditional Formatting…): bold,
+  underline and colours for cells (`C1`, `C1:D5`, a whole column `B:B`)
+  that are greater than, between, containing…, above average, duplicates,
+  the top N, or matching your own formula. Compare with a number, a cell
+  (fixed or in each row), a cell on another sheet or a PivotTable value.
+- **Tables** (Format → Format as Table…, Ctrl+T): a header row and banded
+  rows, columns readable in formulas as `Sales[Price]` and all rows as
+  `Sales`, growing as you type below.
+- **Freeze panes** (View): rows and columns that stay in place while the
+  rest scrolls.
+- **Find and Replace** (Ctrl+F / Ctrl+H) with match case and regular
+  expressions, also inside formulas, and **Go To** (Ctrl+G) for cells,
+  ranges, names and tables.
+- **Comments** on cells (Shift+F2), marked with a red corner and shown on
+  hover.
+- **Filter** a column by a value, by text it contains or by a comparison
+  (Data → Filter…, Ctrl+Shift+L).
+- **Data validation** per column: numbers within limits, a list of values
+  typed in or read from a range (with a dropdown in the cell), a text
+  length, or your own formula.
+- **Name Manager** (Ctrl+F3); typing a new name into the name box names
+  the selection.
+- **Paste Special** (Ctrl+Alt+V): values, formulas or formats only, and
+  transpose. Ctrl+Shift+V pastes values. **Format Painter**, and Clear
+  Formats / Clear Comments.
+- **Sort** by several columns, **Remove Duplicates**, **Text to Columns**
+  and **Goal Seek** in the Data menu.
+- **Formula help**: matching functions and names are listed while you type
+  (Tab inserts one), and the arguments of the current function are shown.
+  **Trace Precedents / Dependents** draws arrows; **Show Formulas**
+  (Ctrl+`) shows formulas instead of results.
+- **Sheets** can be duplicated, and reordered by dragging their tabs.
+- **PDF export and Print** (Ctrl+P) of the current sheet as A4 pages.
+- **`HYPERLINK`** makes a link (Ctrl+click opens it; Ctrl+K inserts one),
+  and **`SPARKLINE`** draws a line or column chart in its cell.
+- Dialogs that ask for a cell or range take it from the grid: click or
+  drag over the cells.
+- A **user guide** at <https://haderlka.github.io/Cellar/>.
+
+### Changed
+
+- **Sort A to Z / Z to A** sorts the block of data around the cursor and
+  keeps its header row, instead of every row of the sheet.
+- **AutoSum** and **Calculate Now** moved to the new **Formulas** menu.
+- **Replace** rewrites formula text and recalculates, instead of skipping
+  formula cells.
+- **`COUNTIF`, `SUMIF` and `AVERAGEIF`** criteria ignore case, as in Excel.
+- Conditional formats are stored with the cells they apply to
+  (`"range": "C2:C50"`) instead of a column number; files with the old
+  form are read and converted on the next save.
+- Tables and conditional formats follow inserted and deleted rows and
+  columns.
+- Build output goes to `_out` instead of `target`.
+
+### Fixed
+
+- The `goalseek` command never found a solution.
+- A conditional-format or validation rule that ended in an error counted
+  as matching.
+
 ## Cellar 0.1.3 — 2026-10-06
 
 Row heights, coloured formula references, and decimal places for number
