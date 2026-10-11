@@ -16,12 +16,16 @@
 </p>
 
 <p align="center">
+  <b><a href="https://haderlka.github.io/Cellar/">Documentation</a></b> ·
+  <a href="https://github.com/haderlka/Cellar/releases">Download</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
+
+<p align="center">
   <a href="https://buymeacoffee.com/haderlka"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="40"></a>
 </p>
 
 ![Cellar with a workbook, a PivotTable and a PivotChart in the sidebar](docs/screenshot.png)
-
-**[User guide](https://haderlka.github.io/Cellar/)**: every feature and how to use it.
 
 ## Why Cellar?
 
@@ -47,6 +51,9 @@ workbook in a `.cellar` file:
 ```
 
 ## Features
+
+The **[documentation](https://haderlka.github.io/Cellar/)** explains every
+feature and how to use it. In short:
 
 **Spreadsheet**
 - Grid with mouse selection, column and row resizing, a formula bar and a name box
@@ -203,7 +210,8 @@ output stays in the cells (the report says where) until you delete it.
 ### Keyboard
 
 Cellar uses Excel's shortcuts, and every menu item shows its shortcut.
-*Help → Keyboard Shortcuts & Formulas* lists them all.
+*Help → Keyboard Shortcuts & Formulas* lists them all, as does the
+[documentation](https://haderlka.github.io/Cellar/shortcuts.html).
 
 | Keys | Action |
 |---|---|
