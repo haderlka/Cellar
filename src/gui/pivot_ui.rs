@@ -678,14 +678,26 @@ impl GuiApp {
             Ok(out) => {
                 // While a formula is being typed, clicking a value inserts
                 // its GETPIVOTDATA call, like clicking a cell inserts A1.
-                let picking = self.edit.as_ref().is_some_and(|e| e.text.starts_with('='));
+                let for_dialog = self.tools.picking_sheet();
+                let picking = for_dialog.is_some() || self.edit.as_ref().is_some_and(|e| e.text.starts_with('='));
                 let picked = egui::ScrollArea::horizontal()
                     .id_salt(("pivot_table", idx))
                     .show(ui, |ui| paint_table(ui, out, &spec, data, &mut new_spec, idx, picking))
                     .inner;
                 if let Some(reference) = picked {
-                    let sheet = self.reference_sheet_prefix().map(|_| self.app.workbook.sheet_names[self.app.workbook.active_sheet].clone());
-                    self.insert_reference(&reference.formula(&spec, sheet.as_deref()));
+                    let wb = &self.app.workbook;
+                    let shown = wb.sheet_names[wb.active_sheet].clone();
+                    match for_dialog {
+                        // A rule on another sheet names this pivot's sheet.
+                        Some(owner) => {
+                            let sheet = (owner != wb.active_sheet).then_some(shown);
+                            self.tools.pick_reference(&reference.formula(&spec, sheet.as_deref()));
+                        }
+                        None => {
+                            let sheet = self.reference_sheet_prefix().map(|_| shown);
+                            self.insert_reference(&reference.formula(&spec, sheet.as_deref()));
+                        }
+                    }
                 }
             }
         }

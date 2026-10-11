@@ -280,6 +280,92 @@ impl Workbook {
         self.sheet_ids.push(id);
     }
 
+    /// Adds a copy of sheet `index` right after it, named like Excel does
+    /// ("Budget (2)"), and returns the copy's index. Formulas without a
+    /// sheet name read the copy; qualified ones keep pointing where they did.
+    pub fn duplicate_sheet(&mut self, index: usize) -> Option<usize> {
+        let source = self.sheets.get(index)?.clone();
+        let base = self.sheet_names[index].clone();
+        let name = (2..)
+            .map(|n| format!("{} ({})", base, n))
+            .find(|n| !self.sheet_names.iter().any(|s| s.eq_ignore_ascii_case(n)))?;
+        let id = SheetId(self.next_sheet_id);
+        self.next_sheet_id = self.next_sheet_id.saturating_add(1);
+        self.sheets.insert(index + 1, source);
+        self.sheet_names.insert(index + 1, name);
+        self.sheet_ids.insert((index + 1).min(self.sheet_ids.len()), id);
+        if self.active_sheet > index {
+            self.active_sheet += 1;
+        }
+        self.rebuild_cross_sheet_deps();
+        self.mark_all_formula_cells_dirty();
+        let _ = self.recalc_via_graph_result();
+        Some(index + 1)
+    }
+
+    /// Moves sheet `from` to position `to` in the tab order. The active
+    /// sheet stays the same sheet. Sheets are identified by name and
+    /// [`SheetId`], so no formula changes.
+    pub fn move_sheet(&mut self, from: usize, to: usize) -> bool {
+        let n = self.sheets.len();
+        if from >= n || to >= n || from == to || self.sheet_ids.len() != n {
+            return false;
+        }
+        let active_id = self.sheet_ids[self.active_sheet];
+        let sheet = self.sheets.remove(from);
+        self.sheets.insert(to, sheet);
+        let name = self.sheet_names.remove(from);
+        self.sheet_names.insert(to, name);
+        let id = self.sheet_ids.remove(from);
+        self.sheet_ids.insert(to, id);
+        self.active_sheet = self.sheet_ids.iter().position(|i| *i == active_id).unwrap_or(0);
+        true
+    }
+
+    /// Re-register the `Table[Column]` names from every sheet's tables and
+    /// recalculate. Call after tables are added, renamed or removed.
+    pub fn rebuild_table_names(&mut self) {
+        self.register_table_names();
+        self.mark_all_formula_cells_dirty();
+        let _ = self.recalc_via_graph_result();
+    }
+
+    /// The names tables give formulas, rebuilt from the tables as they
+    /// are now: `Table[Column]` for a column's cells and `Table` for all
+    /// its data rows. Does nothing in a workbook without tables.
+    fn register_table_names(&mut self) {
+        let is_column_name = |k: &str| k.contains('[');
+        if self.sheets.iter().all(|s| s.tables.is_empty()) && !self.named_ranges.keys().any(|k| is_column_name(k)) {
+            return;
+        }
+        // Tables that are gone are known by the column names they left.
+        let stale: HashSet<String> = self
+            .named_ranges
+            .keys()
+            .filter_map(|k| k.split_once('[').map(|(table, _)| table.to_string()))
+            .collect();
+        self.named_ranges.retain(|k, _| !is_column_name(k) && !stale.contains(k));
+        let mut names: Vec<(String, String)> = Vec::new();
+        let cell = |r: usize, c: usize| Spreadsheet::format_cell_reference(r, c, false, false);
+        for sheet in &self.sheets {
+            for t in &sheet.tables {
+                // An empty table body still names its first data row.
+                let (first, last) = (t.top_row + 1, t.bottom_row.max(t.top_row + 1));
+                let table = t.name.to_uppercase();
+                names.push((table.clone(), format!("{}:{}", cell(first, t.left_col), cell(last, t.right_col))));
+                for (i, header) in t.headers.iter().enumerate() {
+                    let col = t.left_col + i;
+                    names.push((format!("{}[{}]", table, header.to_uppercase()), format!("{}:{}", cell(first, col), cell(last, col))));
+                }
+            }
+        }
+        for sheet in &mut self.sheets {
+            sheet.named_ranges.retain(|k, _| !is_column_name(k) && !stale.contains(k));
+            sheet.named_ranges.extend(names.iter().cloned());
+        }
+        self.named_ranges.extend(names);
+    }
+
     /// Returns the [`SheetId`] at the given index, allocating a fresh
     /// one if the parallel `sheet_ids` vec is missing or stale (e.g.
     /// after loading a pre-PR-1 file). Bounded by the live sheet count.
@@ -815,6 +901,7 @@ impl Workbook {
         // Dirty AFTER the mutation so keys reflect post-shift coordinates.
         // Marking pre-shift would leave dirty pointing at empty cells while
         // the actually-shifted cells go unrecorded.
+        self.register_table_names();
         self.mark_all_formula_cells_dirty();
         let _ = self.recalc_via_graph_result();
     }
@@ -827,6 +914,7 @@ impl Workbook {
         self.adjust_other_sheets_for_structural(active_idx, |evaluator, formula, target| {
             evaluator.adjust_formula_for_sheet_row_delete(formula, target, at)
         });
+        self.register_table_names();
         self.mark_all_formula_cells_dirty();
         let _ = self.recalc_via_graph_result();
     }
@@ -837,6 +925,7 @@ impl Workbook {
         self.adjust_other_sheets_for_structural(active_idx, |evaluator, formula, target| {
             evaluator.adjust_formula_for_sheet_col_insert(formula, target, at)
         });
+        self.register_table_names();
         self.mark_all_formula_cells_dirty();
         let _ = self.recalc_via_graph_result();
     }
@@ -847,6 +936,7 @@ impl Workbook {
         self.adjust_other_sheets_for_structural(active_idx, |evaluator, formula, target| {
             evaluator.adjust_formula_for_sheet_col_delete(formula, target, at)
         });
+        self.register_table_names();
         self.mark_all_formula_cells_dirty();
         let _ = self.recalc_via_graph_result();
     }

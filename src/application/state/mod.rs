@@ -255,7 +255,9 @@ mod navigation;
 mod charts;
 mod pivots;
 mod fill;
+mod tools;
 pub use fill::{fill_target, CellRange, FillMode, FillPlan, FillTarget};
+pub use tools::{filter_matches, valid_name, FormatBlock, PasteMode, SortKey};
 
 impl App {
     pub fn dismiss_transients(&mut self) {

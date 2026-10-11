@@ -147,48 +147,61 @@ impl App {
         }
     }
 
+    /// `cell` after Replace: the text is replaced in a constant, or in
+    /// the formula's text, which is then recalculated (as Excel's Replace
+    /// does with "Look in: Formulas"). `None` when only the formula's
+    /// result matches, or the new formula would refer to itself.
+    fn replaced_cell(&self, row: usize, col: usize, cell: &CellData, matcher: &TextMatcher) -> Option<CellData> {
+        let constant = |value: String| CellData {
+            value,
+            formula: None,
+            format: cell.format.clone(),
+            comment: cell.comment.clone(),
+            spill_anchor: None,
+        };
+        let Some(formula) = &cell.formula else {
+            return Some(constant(matcher.replace_all(&cell.value, &self.find_replace_replace)));
+        };
+        if !matcher.is_match(formula) {
+            return None;
+        }
+        let text = matcher.replace_all(formula, &self.find_replace_replace);
+        if !text.starts_with('=') {
+            return Some(constant(text));
+        }
+        let names = self.workbook.named_ranges.clone();
+        let evaluator = FormulaEvaluator::for_workbook(&self.workbook, self.workbook.current_sheet(), &names);
+        if !self.iterative_calc && evaluator.would_create_circular_reference(&text, (row, col)) {
+            return None;
+        }
+        let value = crate::domain::parser::with_recalc_clock(crate::domain::parser::now_serial(), || {
+            evaluator.evaluate_formula(&text)
+        });
+        Some(CellData { value, formula: Some(text), ..constant(String::new()) })
+    }
+
     pub fn replace_current(&mut self) {
         if self.find_replace_results.is_empty() {
             return;
         }
         let (row, col) = self.find_replace_results[self.find_replace_index];
         let cell = self.workbook.current_sheet().get_cell(row, col);
-        if cell.formula.is_some() {
-            // Don't rewrite formula text. Advance to the next match so the
-            // user pressing Replace repeatedly walks forward instead of
-            // getting stuck on this cell.
-            let next_idx = self
-                .find_replace_results
-                .iter()
-                .position(|&(r, c)| (r, c) > (row, col));
-            self.find_replace_index = next_idx.unwrap_or(0);
-            if let Some(&(r, c)) = self.find_replace_results.get(self.find_replace_index) {
-                self.selected_row = r;
-                self.selected_col = c;
-                self.ensure_cursor_visible();
-            }
-            self.status_message = Some("Skipped formula cell".to_string());
-            return;
-        }
         let matcher = TextMatcher::new(
             &self.find_replace_search,
             self.search_regex,
             self.search_case_sensitive,
         );
-        let new_value = matcher.replace_all(&cell.value, &self.find_replace_replace);
-        let new_cell = CellData {
-            value: new_value,
-            formula: None,
-            format: cell.format.clone(),
-            comment: cell.comment.clone(),
-        spill_anchor: None,
-        };
-        self.set_cell_with_undo(row, col, new_cell);
-        // Refresh the match list (the replacement may itself still match,
-        // or may no longer match) and resume from the cell right after the
-        // one we just replaced — otherwise repeated Replace would loop on
-        // results[0] instead of moving forward through the document.
-        self.find_replace_search();
+        match self.replaced_cell(row, col, &cell, &matcher) {
+            Some(new_cell) => {
+                self.set_cell_with_undo(row, col, new_cell);
+                // Refresh the match list: the replacement may itself still
+                // match, or may no longer match.
+                self.find_replace_search();
+            }
+            None => self.status_message = Some("Skipped: only the formula's result matches".to_string()),
+        }
+        // Resume from the cell right after this one, so repeated Replace
+        // walks forward through the sheet instead of staying put.
         let next_idx = self
             .find_replace_results
             .iter()
@@ -212,30 +225,19 @@ impl App {
         );
         let mut batch = Vec::new();
         let mut writes: Vec<(usize, usize, CellData)> = Vec::new();
-        let mut skipped_formulas = 0usize;
+        let mut skipped = 0usize;
         let results = self.find_replace_results.clone();
         for (row, col) in results {
             let cell = self.workbook.current_sheet().get_cell(row, col);
-            if cell.formula.is_some() {
-                // Excel/Sheets don't rewrite formula text via Replace. Track
-                // the count so we can tell the user why fewer cells changed
-                // than the result list suggested.
-                skipped_formulas += 1;
+            let Some(new_cell) = self.replaced_cell(row, col, &cell, &matcher) else {
+                // Tell the user why fewer cells changed than were found.
+                skipped += 1;
                 continue;
-            }
-            let old_cell = Some(cell.clone());
-            let new_value = matcher.replace_all(&cell.value, &self.find_replace_replace);
-            let new_cell = CellData {
-                value: new_value,
-                formula: None,
-                format: cell.format.clone(),
-                comment: cell.comment.clone(),
-                spill_anchor: None,
             };
             batch.push(UndoAction::CellModified {
                 row,
                 col,
-                old_cell,
+                old_cell: Some(cell),
                 new_cell: Some(new_cell.clone()),
             });
             writes.push((row, col, new_cell));
@@ -245,16 +247,15 @@ impl App {
         // propagation for the whole batch.
         self.workbook.write_cells_on_active(writes);
         if !batch.is_empty() {
-            // Only clear redo when an actual mutation happened — an all-
-            // formula-skipped replace is effectively a no-op and shouldn't
-            // discard the user's redo history.
+            // Only clear redo when an actual mutation happened — a replace
+            // that skipped everything shouldn't discard the redo history.
             self.redo_stack.clear();
             self.record_action(UndoAction::Batch(batch));
         }
-        let msg = if skipped_formulas > 0 {
-            format!("Replaced {} occurrence(s); skipped {} formula cell(s)", count, skipped_formulas)
+        let msg = if skipped > 0 {
+            format!("Replaced in {} cell(s); skipped {} where only the formula's result matches", count, skipped)
         } else {
-            format!("Replaced {} occurrence(s)", count)
+            format!("Replaced in {} cell(s)", count)
         };
         self.status_message = Some(msg);
         self.find_replace_results.clear();
@@ -452,8 +453,37 @@ mod tests {
         // Should find the cell but not replace it
         app.replace_current();
 
-        // Formula cell value should be unchanged (replace_current skips formula cells)
+        // Only the result matched, not the formula's text: left alone.
         assert_eq!(app.workbook.current_sheet().get_cell(0, 0).formula, Some("=A2".to_string()));
+    }
+
+    #[test]
+    fn replace_rewrites_formula_text_and_recalculates() {
+        let mut app = App::default();
+        let value = |v: &str| CellData { value: v.to_string(), ..CellData::default() };
+        app.set_cell_with_undo(0, 0, value("2"));
+        app.set_cell_with_undo(1, 0, value("8"));
+        app.set_cell_with_undo(2, 0, CellData { formula: Some("=SUM(A1:A2)".to_string()), ..value("10") });
+        app.set_cell_with_undo(3, 0, CellData { formula: Some("=SUM(A1:A2)*2".to_string()), ..value("20") });
+
+        app.find_replace_search = "SUM".to_string();
+        app.find_replace_replace = "MAX".to_string();
+        app.find_replace_search();
+        app.replace_all();
+        let sheet = app.workbook.current_sheet();
+        assert_eq!(sheet.get_cell(2, 0).formula.as_deref(), Some("=MAX(A1:A2)"));
+        assert_eq!(sheet.get_cell(2, 0).value, "8");
+        assert_eq!(sheet.get_cell(3, 0).value, "16");
+        app.undo();
+        assert_eq!(app.workbook.current_sheet().get_cell(2, 0).value, "10");
+
+        // A replacement that would make the formula read itself is skipped.
+        app.find_replace_search = "A2".to_string();
+        app.find_replace_replace = "A3".to_string();
+        app.find_replace_search();
+        app.replace_all();
+        assert_eq!(app.workbook.current_sheet().get_cell(2, 0).formula.as_deref(), Some("=SUM(A1:A2)"));
+        assert_eq!(app.workbook.current_sheet().get_cell(3, 0).formula.as_deref(), Some("=SUM(A1:A3)*2"));
     }
 
     #[test]

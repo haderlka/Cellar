@@ -39,6 +39,8 @@ src/
 ├── application/state/       # App: the editing session used by the GUI
 │                            #   mod.rs (App, AppMode), undo.rs, editing.rs, clipboard.rs,
 │                            #   fill.rs (fill handle), formatting.rs, charts.rs, pivots.rs,
+│                            #   tools.rs (sort, dedupe, text to columns, goal seek, paste
+│                            #   special, format painter, tables, names, CF, validation, filter),
 │                            #   navigation.rs, search.rs, io.rs, command/ (sheet commands)
 ├── infrastructure/          # all I/O
 │   ├── persistence.rs       #   load/save workbooks
@@ -49,13 +51,18 @@ src/
 │   ├── xlsx_convert.rs      #   Excel/ODS → Cellar conversion + verification report
 │   ├── import.rs            #   ImportFormat: File → Import / Open of non-.cellar files
 │   ├── chart_image.rs       #   charts → PNG/SVG (plotters)
+│   ├── pdf.rs               #   sheet → PDF (hand-written), for Export and Print
 │   ├── app_dirs.rs          #   where Cellar stores its own files (config, cache)
 │   ├── uninstall.rs         #   `cellar --uninstall`: data, terminal links, program
 │   ├── recent.rs, sidecar.rs (rich clipboard), fetcher.rs (GET), atomic.rs, autosave.rs
 └── gui/                     # binary `cellar`
     ├── main.rs              #   startup, window icon, batch commands
     ├── app.rs               #   GuiApp: menus, formula bar, tabs, keys, files
-    ├── grid.rs              #   virtualized grid, selection, fill handle, cell editor
+    ├── grid.rs              #   virtualized grid, frozen panes, selection, fill handle, cell editor
+    ├── tools.rs             #   dialogs for find/replace, go to, comments, tables, CF, filter,
+    │                        #   validation, names, sort, duplicates, goal seek…
+    ├── formula_help.rs      #   function/name suggestions and argument hints while typing
+    ├── smoke.rs             #   tests: headless frames through the window and its dialogs
     ├── sidebar.rs           #   PivotTable and chart cards
     ├── pivot_ui.rs          #   PivotTable Fields pane, settings dialogs, table rendering
     ├── charts.rs            #   chart drawing (egui_plot), chart dialog, export
@@ -104,6 +111,23 @@ so `cellar --uninstall` removes it. A location that can't live there must be
 added to `app_dirs::data_locations`. `app_dirs::BUNDLE_ID` must match
 `CFBundleIdentifier` in `.github/workflows/release.yml`.
 
+**Tables, rules and view state stay small.** A `Table` is a name, a range
+and its header titles; its look (header fill, banded rows) is computed by
+`Spreadsheet::table_style_for`, never stored. Conditional formats and
+validation rules are a column plus a predicate in which a lone `_` is the
+value and `ROW()` the cell's row (`Spreadsheet::predicate_holds_at`); the
+dialogs only generate predicates (same-row comparisons, top N, dropdown
+lists as `OR(_ = …)` or `COUNTIF(range, _) > 0`, which
+`App::validation_choices` reads back). Predicates that read other sheets or
+PivotTables need `with_recalc_context`, which the grid and PDF export set.
+A filter is one column and one criteria string (`=text`, `<>text`, `>n`…,
+otherwise contains; `filter_matches`) plus the hidden rows.
+Links and sparklines are formulas (`HYPERLINK`, `SPARKLINE`) the grid draws
+specially. New features should fit these shapes before adding fields.
+Tables and rules shift with inserted/deleted rows and columns
+(`Spreadsheet::shift_tables`); `Workbook::rebuild_table_names` keeps the
+`Table[Column]` names in step.
+
 **PivotTables and charts are definitions.** `PivotSpec` / `ChartSpec` are
 stored per sheet; results are computed when shown (`services::pivot`,
 `services::chart_data`). PivotCharts reference their pivot by name;
@@ -133,7 +157,13 @@ over the grid (cell editor, Auto Fill button) register their rects in
 `GridState::overlays` so presses don't fall through. Draggable chips use
 `Response::dnd_set_drag_payload` on a click-and-drag button, because egui
 can't nest clickable widgets inside `dnd_drag_source`. egui's default font
-lacks some symbols (→, ▾, ✕); use words or painted shapes instead.
+lacks some symbols (→, ▾, ✕, ≥); use words or painted shapes instead.
+Frozen panes: `Layout::cell_rect` places frozen rows/columns from the
+viewport and the rest from the scrolled origin; paint per pane
+(`Layout::pane`, `range_parts`) so nothing shows through. `ui.close()` does
+not close an `egui::Window`; use a flag. Dialogs with a cell or range
+field are `egui::Window`s (not `Modal`, which blocks the grid) and take
+clicked/dragged cells through `Tools::picking` / `pick_reference`.
 
 ## Tests
 
@@ -144,4 +174,7 @@ lacks some symbols (→, ▾, ✕); use words or painted shapes instead.
   `App` exactly like the GUI, and checks every result against a pure-Rust
   implementation. Derive expected values from the scenario's `compute()`,
   never from a Cellar run.
-- The GUI itself has no automated tests; check UI changes by running the app.
+- `src/gui/smoke.rs` runs the window headlessly (`Context::run_ui`): it
+  opens every tool dialog, sends keys and paints the grid, which catches
+  panics and wiring mistakes. It does not look at pixels; check how UI
+  changes look by running the app.

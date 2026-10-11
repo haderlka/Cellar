@@ -1,4 +1,5 @@
-//! `viz` builtin functions.
+//! `viz` builtin functions: SPARKLINE and HYPERLINK, which the GUI draws
+//! specially.
 //!
 //! Each function registers itself on the provided `FunctionRegistry` via
 //! `reg.register_function(NAME, |args| ...)`. The category-level `register`
@@ -9,8 +10,15 @@ use crate::domain::parser::{FunctionRegistry, Value, ErrorKind, flatten_args, sh
 
 /// Register all `viz` builtin functions on `reg`.
 pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
+        // SPARKLINE(data, [type]): the GUI draws the chart in the cell
+        // ("line", "column" or "bar"); the value is a block-character
+        // rendering for text exports.
         reg.register_function("SPARKLINE", |args| {
-            let flat = flatten_args(args);
+            let data = match args.split_last() {
+                Some((Value::String(_), rest)) if !rest.is_empty() => rest,
+                _ => args,
+            };
+            let flat = flatten_args(data);
             if flat.is_empty() {
                 return Ok(Value::Error(ErrorKind::Value));
             }
@@ -28,6 +36,13 @@ pub(in crate::domain::parser) fn register(reg: &mut FunctionRegistry) {
                 }
             }).collect();
             Ok(Value::String(sparkline))
+        });
+        // HYPERLINK(url, [label]): shows the label (or the URL); the GUI
+        // opens the URL on Ctrl+click.
+        reg.register_function("HYPERLINK", |args| match args {
+            [url] => Ok(Value::String(url.to_string())),
+            [_, label] => Ok(label.clone()),
+            _ => Ok(Value::Error(ErrorKind::Value)),
         });
 }
 

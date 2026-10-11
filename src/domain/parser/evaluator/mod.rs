@@ -45,8 +45,8 @@ fn walk_purity(expr: &Expr, registry: &FunctionRegistry, acc: &mut FunctionPurit
             // INDIRECT and OFFSET have inline handling in
             // `ExpressionEvaluator::evaluate` rather than in the
             // registry. The other classical Excel volatile-structural
-            // functions (CHOOSE, ROW, COLUMN, FORMULATEXT, CELL, INFO,
-            // HYPERLINK) aren't yet implemented in Cellar — they'd
+            // functions (CHOOSE, ROW, COLUMN, FORMULATEXT, CELL, INFO)
+            // aren't yet implemented in Cellar — they'd
             // error before reaching here. Keep the list narrow to
             // reflect actual coverage; widen as those functions land.
             let inline_volatile_structural = matches!(

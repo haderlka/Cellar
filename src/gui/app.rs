@@ -37,6 +37,9 @@ pub struct Edit {
     /// Byte offset where the last clicked-in reference starts, so a second
     /// click replaces it instead of appending (Excel's "point mode").
     pub ref_start: Option<usize>,
+    /// Where to put the caret (in characters) when the editor is next
+    /// focused; the end of the text when unset.
+    pub caret: Option<usize>,
 }
 
 /// Actions that would discard unsaved changes and so ask first.
@@ -56,6 +59,13 @@ pub struct GuiApp {
     pub edit: Option<Edit>,
     pub grid: GridState,
     pub dialogs: Dialogs,
+    pub tools: crate::tools::Tools,
+    /// Formula suggestions shown this frame and the frame before (see
+    /// `formula_help.rs`).
+    pub assist: Option<crate::formula_help::Assist>,
+    pub assist_previous: Option<crate::formula_help::Assist>,
+    /// For opening links from places that have no `Ui` at hand.
+    pub window_ctx: Context,
     pub pivots: crate::pivot_ui::PivotUi,
     pub show_sidebar: bool,
     /// A Delete clicked on a sidebar card, applied once the sidebar is drawn.
@@ -84,6 +94,10 @@ impl GuiApp {
             edit: None,
             grid: GridState::default(),
             dialogs: Dialogs::default(),
+            tools: Default::default(),
+            assist: None,
+            assist_previous: None,
+            window_ctx: cc.egui_ctx.clone(),
             pivots: Default::default(),
             show_sidebar: true,
             sidebar_delete: None,
@@ -158,6 +172,7 @@ impl GuiApp {
     fn reset_view(&mut self) {
         self.edit = None;
         self.grid = GridState::default();
+        self.tools = Default::default();
         self.app.clear_selection();
     }
 
@@ -232,6 +247,57 @@ impl GuiApp {
                     Err(e) => format!("Export failed: {}", e),
                 });
         }
+    }
+
+    /// The sheet shown as PDF bytes and a name for it, or a status message
+    /// when it is empty.
+    fn sheet_pdf(&mut self) -> Option<(Vec<u8>, String)> {
+        self.commit_edit(EditMove::Stay);
+        // Hidden rows and columns live in the view state the PDF reads.
+        self.app.snapshot_view_state_to_active_sheet();
+        let wb = &self.app.workbook;
+        let name = format!("{} - {}", self.base_name(), wb.sheet_names[wb.active_sheet]);
+        let pdf = cellar::domain::with_recalc_context(wb, || {
+            cellar::infrastructure::pdf::sheet_to_pdf(wb.current_sheet(), &name)
+        });
+        if pdf.is_none() {
+            self.app.status_message = Some("Nothing to print: the sheet is empty".into());
+        }
+        pdf.map(|bytes| (bytes, name))
+    }
+
+    fn export_pdf(&mut self) {
+        let Some((bytes, name)) = self.sheet_pdf() else { return };
+        if let Some(mut path) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(format!("{}.pdf", name)).save_file() {
+            if path.extension().is_none() {
+                path.set_extension("pdf");
+            }
+            self.app.status_message = Some(match cellar::infrastructure::atomic::atomic_write(&path.to_string_lossy(), &bytes) {
+                Ok(_) => format!("Exported {}", file_name(&path)),
+                Err(e) => format!("Export failed: {}", e),
+            });
+        }
+    }
+
+    /// Print: write the sheet as a PDF into Cellar's cache and open it in
+    /// the system's PDF viewer, which does the printing.
+    fn print(&mut self) {
+        let Some((bytes, _)) = self.sheet_pdf() else { return };
+        let Some(dir) = cellar::infrastructure::app_dirs::cache_dir() else {
+            self.app.status_message = Some("Print failed: no home folder for the temporary PDF".into());
+            return;
+        };
+        let path = dir.join("print.pdf");
+        let written = std::fs::create_dir_all(&dir)
+            .and_then(|_| cellar::infrastructure::atomic::atomic_write(&path.to_string_lossy(), &bytes));
+        self.app.status_message = Some(match written {
+            Ok(_) => {
+                let url = format!("file:///{}", path.to_string_lossy().replace('\\', "/").trim_start_matches('/'));
+                self.window_ctx.open_url(egui::OpenUrl::new_tab(url));
+                "Opened the sheet as a PDF: print it from the viewer".to_string()
+            }
+            Err(e) => format!("Print failed: {}", e),
+        });
     }
 
     /// Markdown table(s) of the computed values, no formatting.
@@ -347,13 +413,27 @@ impl GuiApp {
         }
         let text = initial.unwrap_or_else(|| self.cell_input_text(row, col));
         let sheet = self.app.workbook.active_sheet;
-        self.edit = Some(Edit { sheet, row, col, text, in_cell, focus_pending: true, ref_start: None });
+        self.edit = Some(Edit { sheet, row, col, text, in_cell, focus_pending: true, ref_start: None, caret: None });
         self.grid.scroll_to_cursor = true;
     }
 
     /// Write the pending edit through Cellar's normal commit path (formula
     /// evaluation, cycle checks, undo) and move the cursor.
     pub fn commit_edit(&mut self, mv: EditMove) {
+        // Data validation: an entry that breaks its column's rule is held
+        // back until the user decides (see `invalid_entry_dialog`).
+        if let Some(edit) = &self.edit
+            && edit.sheet == self.app.workbook.active_sheet
+            && let Some(rule) = self.app.validation_error(edit.row, edit.col, &edit.text)
+            && let Some(edit) = self.edit.take()
+        {
+            self.tools.invalid = Some(crate::tools::InvalidEntry::new(edit, rule, mv));
+            return;
+        }
+        self.commit_edit_unchecked(mv);
+    }
+
+    pub fn commit_edit_unchecked(&mut self, mv: EditMove) {
         let Some(edit) = self.edit.take() else { return };
         // A formula picked across sheets is entered on its own sheet.
         self.show_sheet(edit.sheet);
@@ -385,7 +465,7 @@ impl GuiApp {
     }
 
     /// Show sheet `idx`, keeping each sheet's cursor and scroll position.
-    fn show_sheet(&mut self, idx: usize) {
+    pub(crate) fn show_sheet(&mut self, idx: usize) {
         if idx == self.app.workbook.active_sheet || idx >= self.app.workbook.sheets.len() {
             return;
         }
@@ -463,7 +543,10 @@ impl GuiApp {
 
     fn handle_keys(&mut self, ctx: &Context) {
         let typing = ctx.egui_wants_keyboard_input();
-        let modal_open = self.dialogs.any_open() || self.pivots.any_dialog_open() || self.structure_dialog.is_some();
+        let modal_open = self.dialogs.any_open()
+            || self.tools.any_open()
+            || self.pivots.any_dialog_open()
+            || self.structure_dialog.is_some();
 
         // Shortcut table (see shortcuts.rs). Bindings with more modifiers
         // are tried first so Ctrl+Shift+9 isn't taken as Ctrl+9.
@@ -531,6 +614,9 @@ impl GuiApp {
         match clipboard_op {
             Some("copy") => self.app.copy_selection(),
             Some("cut") => self.app.cut_selection(),
+            // egui reports Ctrl+Alt+V and Ctrl+Shift+V as pastes too.
+            Some("paste") if mods.alt => self.open_paste_special(),
+            Some("paste") if mods.shift => self.do_action(ctx, Action::PasteValues),
             Some("paste") => {
                 self.app.paste();
                 self.ensure_sheet_size();
@@ -570,7 +656,11 @@ impl GuiApp {
                 }
                 Key::F2 => self.start_edit(None, true),
                 Key::Delete | Key::Backspace => self.app.clear_selection_contents(),
-                Key::Escape => self.app.dismiss_transients(),
+                Key::Escape => {
+                    self.app.dismiss_transients();
+                    self.tools.painter = None;
+                    self.tools.trace = None;
+                }
                 _ => {}
             }
         }
@@ -590,11 +680,17 @@ impl GuiApp {
             let range = self.app.get_selection_range().filter(|_| home);
             let at = self.edit.as_ref().map(|e| (e.row, e.col));
             self.commit_edit(EditMove::Stay);
-            if let (Some(range), Some(at)) = (range, at) {
+            if let (Some(range), Some(at)) = (range, at)
+                && self.tools.invalid.is_none()
+            {
                 self.app.fill_block_from(at, range);
                 self.app.selection_start = Some(range.0);
                 self.app.selection_end = Some(range.1);
             }
+            return;
+        }
+        // The formula suggestion list takes Tab and the up/down arrows.
+        if typing && self.handle_assist_keys(ctx) {
             return;
         }
         let (enter, tab, esc, shift) = ctx.input_mut(|i| {
@@ -705,7 +801,10 @@ impl GuiApp {
                     if ui.button("All charts as SVG…").clicked() {
                         self.export_all_charts("svg");
                     }
+                    ui.separator();
+                    self.menu_item(ui, ctx, Action::ExportPdf);
                 });
+                self.menu_item(ui, ctx, Action::Print);
                 ui.separator();
                 self.menu_item(ui, ctx, Action::Quit);
             });
@@ -714,7 +813,16 @@ impl GuiApp {
                     self.menu_item(ui, ctx, a);
                 }
                 ui.separator();
-                for a in [Action::Cut, Action::Copy, Action::Paste, Action::ClearContents, Action::CopyMarkdown] {
+                for a in [Action::Cut, Action::Copy, Action::Paste, Action::PasteSpecial, Action::PasteValues, Action::CopyMarkdown] {
+                    self.menu_item(ui, ctx, a);
+                }
+                ui.menu_button("Clear", |ui| {
+                    for a in [Action::ClearContents, Action::ClearFormats, Action::ClearComments] {
+                        self.menu_item(ui, ctx, a);
+                    }
+                });
+                ui.separator();
+                for a in [Action::Find, Action::Replace, Action::GoTo] {
                     self.menu_item(ui, ctx, a);
                 }
                 ui.separator();
@@ -731,24 +839,43 @@ impl GuiApp {
                     self.menu_item(ui, ctx, a);
                 }
                 ui.separator();
-                for a in [Action::InsertDate, Action::InsertTime] {
+                for a in [Action::InsertDate, Action::InsertTime, Action::InsertHyperlink, Action::EditComment] {
                     self.menu_item(ui, ctx, a);
                 }
             });
             ui.menu_button("Format", |ui| self.format_menu(ui, ctx));
-            ui.menu_button("Data", |ui| {
+            ui.menu_button("Formulas", |ui| {
                 self.menu_item(ui, ctx, Action::AutoSum);
+                self.menu_item(ui, ctx, Action::NameManager);
                 ui.separator();
-                self.menu_item(ui, ctx, Action::SortAscending);
-                self.menu_item(ui, ctx, Action::SortDescending);
-                ui.separator();
-                self.menu_item(ui, ctx, Action::PivotTable);
-                self.menu_item(ui, ctx, Action::InsertChart);
+                self.menu_item(ui, ctx, Action::TracePrecedents);
+                self.menu_item(ui, ctx, Action::TraceDependents);
+                self.menu_item(ui, ctx, Action::ShowFormulas);
                 ui.separator();
                 self.menu_item(ui, ctx, Action::Recalculate);
             });
+            ui.menu_button("Data", |ui| {
+                for a in [Action::SortAscending, Action::SortDescending, Action::SortDialog] {
+                    self.menu_item(ui, ctx, a);
+                }
+                ui.separator();
+                for a in [Action::Filter, Action::FilterBySelection, Action::ClearFilter] {
+                    self.menu_item(ui, ctx, a);
+                }
+                ui.separator();
+                for a in [Action::RemoveDuplicates, Action::TextToColumns, Action::DataValidation, Action::GoalSeek] {
+                    self.menu_item(ui, ctx, a);
+                }
+                ui.separator();
+                self.menu_item(ui, ctx, Action::PivotTable);
+                self.menu_item(ui, ctx, Action::InsertChart);
+            });
             ui.menu_button("Sheet", |ui| {
-                for a in [Action::NewSheet, Action::RenameSheet, Action::DeleteSheet] {
+                for a in [Action::NewSheet, Action::DuplicateSheet, Action::RenameSheet, Action::DeleteSheet] {
+                    self.menu_item(ui, ctx, a);
+                }
+                ui.separator();
+                for a in [Action::MoveSheetLeft, Action::MoveSheetRight] {
                     self.menu_item(ui, ctx, a);
                 }
                 ui.separator();
@@ -758,6 +885,11 @@ impl GuiApp {
             });
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut self.show_sidebar, Action::ToggleSidebar.label());
+                ui.checkbox(&mut self.tools.show_formulas, Action::ShowFormulas.label());
+                ui.separator();
+                for a in [Action::FreezePanes, Action::FreezeTopRow, Action::FreezeFirstColumn, Action::Unfreeze] {
+                    self.menu_item(ui, ctx, a);
+                }
                 ui.separator();
                 for a in [Action::ZoomIn, Action::ZoomOut, Action::ZoomReset] {
                     self.menu_item(ui, ctx, a);
@@ -775,8 +907,12 @@ impl GuiApp {
     pub fn menu_item(&mut self, ui: &mut egui::Ui, ctx: &Context, action: Action) {
         let enabled = match action {
             Action::DeleteSheet => self.app.workbook.sheets.len() > 1,
-            Action::NextSheet => self.app.workbook.active_sheet + 1 < self.app.workbook.sheets.len(),
-            Action::PreviousSheet => self.app.workbook.active_sheet > 0,
+            Action::NextSheet | Action::MoveSheetRight => {
+                self.app.workbook.active_sheet + 1 < self.app.workbook.sheets.len()
+            }
+            Action::PreviousSheet | Action::MoveSheetLeft => self.app.workbook.active_sheet > 0,
+            Action::Unfreeze => self.app.frozen_rows > 0 || self.app.frozen_cols > 0,
+            Action::ClearFilter => self.app.filter_column.is_some(),
             _ => true,
         };
         let button = Button::new(action.label()).shortcut_text(action.shortcut_text(ctx));
@@ -794,6 +930,7 @@ impl GuiApp {
     fn format_menu(&mut self, ui: &mut egui::Ui, ctx: &Context) {
         self.menu_item(ui, ctx, Action::Bold);
         self.menu_item(ui, ctx, Action::Underline);
+        self.menu_item(ui, ctx, Action::FormatPainter);
         ui.separator();
         ui.menu_button("Number Format", |ui| {
             for a in [Action::FormatGeneral, Action::FormatNumber, Action::FormatCurrency, Action::FormatPercent] {
@@ -816,6 +953,9 @@ impl GuiApp {
             }
         });
         self.menu_item(ui, ctx, Action::AutoFitColumn);
+        ui.separator();
+        self.menu_item(ui, ctx, Action::ConditionalFormatting);
+        self.menu_item(ui, ctx, Action::FormatAsTable);
     }
 
     /// Run a menu command / shortcut.
@@ -825,6 +965,8 @@ impl GuiApp {
             Action::Open => self.guarded(ctx, Guarded::Open),
             Action::Save => self.save(),
             Action::SaveAs => self.save_as(),
+            Action::ExportPdf => self.export_pdf(),
+            Action::Print => self.print(),
             Action::Quit => self.guarded(ctx, Guarded::Quit),
             Action::Undo => {
                 self.commit_edit(EditMove::Stay);
@@ -840,8 +982,22 @@ impl GuiApp {
                 self.app.paste();
                 self.ensure_sheet_size();
             }
+            Action::PasteSpecial => self.open_paste_special(),
+            Action::PasteValues => {
+                self.commit_edit(EditMove::Stay);
+                self.app.paste_special(cellar::application::PasteMode::Values, false);
+                self.ensure_sheet_size();
+            }
             Action::ClearContents => self.app.clear_selection_contents(),
+            Action::ClearFormats => self.app.clear_selection_formats(),
+            Action::ClearComments => self.app.clear_selection_comments(),
             Action::CopyMarkdown => self.copy_selection_markdown(ctx),
+            Action::FormatPainter => self.toggle_format_painter(),
+            Action::Find => self.open_find(false),
+            Action::Replace => self.open_find(true),
+            Action::GoTo => self.open_goto(),
+            Action::EditComment => self.open_comment(),
+            Action::InsertHyperlink => self.open_link_dialog(),
             Action::FillDown => self.app.fill_down_or_right(true),
             Action::FillRight => self.app.fill_down_or_right(false),
             Action::FillSeries => self.app.autofill_selection(),
@@ -889,9 +1045,25 @@ impl GuiApp {
                 }
                 self.app.dirty = true;
             }
+            Action::ConditionalFormatting => self.open_conditional(),
+            Action::FormatAsTable => self.open_table(),
             Action::AutoSum => self.auto_sum(),
-            Action::SortAscending => self.app.sort_column_asc(),
-            Action::SortDescending => self.app.sort_column_desc(),
+            Action::SortAscending | Action::SortDescending => {
+                self.commit_edit(EditMove::Stay);
+                self.app.sort_selection(action == Action::SortAscending);
+            }
+            Action::SortDialog => self.open_sort(),
+            Action::Filter => self.open_filter(),
+            Action::FilterBySelection => self.filter_by_selection(),
+            Action::ClearFilter => self.clear_filter(),
+            Action::RemoveDuplicates => self.open_duplicates(),
+            Action::TextToColumns => self.open_split(),
+            Action::DataValidation => self.open_validation(),
+            Action::GoalSeek => self.open_goal_seek(),
+            Action::NameManager => self.open_names(),
+            Action::TracePrecedents => self.trace(true),
+            Action::TraceDependents => self.trace(false),
+            Action::ShowFormulas => self.tools.show_formulas = !self.tools.show_formulas,
             Action::PivotTable => self.open_create_pivot(),
             Action::InsertChart => self.open_chart_dialog(None),
             Action::Recalculate => self.app.recalc_all(),
@@ -909,7 +1081,34 @@ impl GuiApp {
                 }
             }
             Action::RenameSheet => self.dialogs.open_rename(&self.app),
+            Action::DuplicateSheet => {
+                self.commit_edit(EditMove::Stay);
+                self.app.duplicate_sheet();
+                self.grid = GridState::default();
+            }
+            Action::MoveSheetLeft | Action::MoveSheetRight => {
+                let from = self.app.workbook.active_sheet;
+                let to = if action == Action::MoveSheetLeft { from.saturating_sub(1) } else { from + 1 };
+                self.commit_edit(EditMove::Stay);
+                self.app.move_sheet(from, to);
+            }
             Action::DeleteSheet => self.run_command("sheet delete"),
+            Action::FreezePanes | Action::FreezeTopRow | Action::FreezeFirstColumn | Action::Unfreeze => {
+                let (rows, cols) = match action {
+                    Action::FreezePanes => (self.app.selected_row, self.app.selected_col),
+                    Action::FreezeTopRow => (1, 0),
+                    Action::FreezeFirstColumn => (0, 1),
+                    _ => (0, 0),
+                };
+                self.app.frozen_rows = rows;
+                self.app.frozen_cols = cols;
+                self.app.dirty = true;
+                self.app.status_message = Some(match (action, rows, cols) {
+                    (Action::Unfreeze, ..) => "Panes unfrozen".to_string(),
+                    (_, 0, 0) => "Select the first cell that should scroll, then freeze".to_string(),
+                    _ => format!("Frozen: {} row(s) and {} column(s)", rows, cols),
+                });
+            }
             Action::ToggleSidebar => self.show_sidebar = !self.show_sidebar,
             Action::ZoomIn => ctx.set_zoom_factor((ctx.zoom_factor() * 1.1).min(3.0)),
             Action::ZoomOut => ctx.set_zoom_factor((ctx.zoom_factor() / 1.1).max(0.5)),
@@ -1144,8 +1343,14 @@ impl GuiApp {
             if nb.lost_focus() {
                 self.name_box_editing = false;
                 if ui.input(|i| i.key_pressed(Key::Enter)) {
-                    let target = self.name_box.trim().to_uppercase();
-                    self.goto(&target);
+                    // A reference or name goes there; a new name is given
+                    // to the selection, as in Excel.
+                    let target = self.name_box.trim().to_string();
+                    if self.app.resolve_reference(&target).is_some() {
+                        self.goto(&target);
+                    } else if !target.is_empty() {
+                        self.name_selection(&target);
+                    }
                 }
             }
             ui.label(RichText::new("fx").italics().weak());
@@ -1184,6 +1389,7 @@ impl GuiApp {
                             in_cell: false,
                             focus_pending: false,
                             ref_start: None,
+                            caret: None,
                         })
                     }
                 }
@@ -1200,7 +1406,11 @@ impl GuiApp {
             {
                 e.focus_pending = false;
                 resp.request_focus();
-                move_caret_to_end(ui.ctx(), id, e.text.chars().count());
+                let caret = e.caret.take().unwrap_or(e.text.chars().count());
+                move_caret_to_end(ui.ctx(), id, caret);
+            }
+            if self.edit.as_ref().is_some_and(|e| !e.in_cell || e.sheet != self.app.workbook.active_sheet) {
+                self.formula_assist(ui.ctx(), id, resp.rect);
             }
         });
     }
@@ -1228,28 +1438,43 @@ impl GuiApp {
         }
     }
 
-    fn goto(&mut self, target: &str) {
-        let (a, b) = target.split_once(':').unwrap_or((target, target));
-        match (Spreadsheet::parse_cell_reference(a), Spreadsheet::parse_cell_reference(b)) {
-            (Some((r0, c0)), Some((r1, c1))) => {
+    /// Go to a cell, range, name or table, on any sheet.
+    pub fn goto(&mut self, target: &str) {
+        match self.app.resolve_reference(target) {
+            Some((sheet, (a, b))) => {
                 self.commit_edit(EditMove::Stay);
-                self.set_cursor(r0, c0);
-                if (r0, c0) != (r1, c1) {
-                    self.grow_to(r1, c1);
-                    self.app.selection_start = Some((r0, c0));
-                    self.app.selection_end = Some((r1, c1));
+                self.show_sheet(sheet);
+                self.set_cursor(a.0, a.1);
+                if a != b {
+                    self.grow_to(b.0, b.1);
+                    self.app.selection_start = Some(a);
+                    self.app.selection_end = Some(b);
                 }
                 self.grid.scroll_to_cursor = true;
             }
-            _ => self.app.status_message = Some(format!("Not a cell reference: {}", target)),
+            None => self.app.status_message = Some(format!("Not a cell, range or name: {}", target)),
         }
     }
 
     fn sheet_tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let active = self.app.workbook.active_sheet;
+            let count = self.app.workbook.sheets.len();
+            let mut rects = Vec::with_capacity(count);
+            // A tab being dragged to a new place, and one dropped there.
+            let mut dragging = None;
+            let mut dropped = None;
             for (idx, name) in self.app.workbook.sheet_names.clone().iter().enumerate() {
-                let tab = ui.selectable_label(idx == active, format!("  {}  ", name));
+                let tab = ui.add(
+                    Button::selectable(idx == active, format!("  {}  ", name)).sense(egui::Sense::click_and_drag()),
+                );
+                rects.push(tab.rect);
+                if tab.dragged() {
+                    dragging = Some(idx);
+                }
+                if tab.drag_stopped() {
+                    dropped = Some(idx);
+                }
                 if tab.clicked() && idx != active {
                     match &mut self.edit {
                         // Typing a formula: show the sheet to click references
@@ -1268,23 +1493,48 @@ impl GuiApp {
                     self.dialogs.open_rename(&self.app);
                 }
                 tab.context_menu(|ui| {
-                    if ui.button("Rename…").clicked() {
-                        if idx != self.app.workbook.active_sheet {
-                            self.app.switch_to_sheet(idx);
-                        }
-                        self.dialogs.open_rename(&self.app);
+                    let ctx = ui.ctx().clone();
+                    // The menu acts on the tab it was opened on.
+                    if idx != self.app.workbook.active_sheet {
+                        self.commit_edit(EditMove::Stay);
+                        self.show_sheet(idx);
                     }
-                    let can_delete = self.app.workbook.sheets.len() > 1;
-                    if ui.add_enabled(can_delete, Button::new("Delete")).clicked() {
-                        if idx != self.app.workbook.active_sheet {
-                            self.app.switch_to_sheet(idx);
-                        }
-                        self.run_command("sheet delete");
+                    for a in [
+                        Action::RenameSheet,
+                        Action::DuplicateSheet,
+                        Action::MoveSheetLeft,
+                        Action::MoveSheetRight,
+                        Action::DeleteSheet,
+                    ] {
+                        self.menu_item(ui, &ctx, a);
                     }
                 });
             }
             if ui.button("+").on_hover_text("New sheet").clicked() {
                 self.run_command("sheet new");
+            }
+
+            // Drag a tab sideways to reorder the sheets.
+            let pointer = ui.ctx().pointer_interact_pos();
+            let target = |x: f32| rects.iter().position(|r| x < r.center().x).unwrap_or(count).min(count);
+            if let (Some(from), Some(pos)) = (dragging, pointer) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                let slot = target(pos.x);
+                if slot != from && slot != from + 1 {
+                    let x = if slot < count { rects[slot].min.x } else { rects[count - 1].max.x };
+                    let stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
+                    ui.painter().vline(x - 1.0, rects[from].y_range(), stroke);
+                }
+            }
+            if let (Some(from), Some(pos)) = (dropped, pointer) {
+                // Dropping before slot `s` puts the sheet at s, or s-1
+                // when it came from further left.
+                let slot = target(pos.x);
+                let to = if slot > from { slot - 1 } else { slot };
+                if to != from {
+                    self.commit_edit(EditMove::Stay);
+                    self.app.move_sheet(from, to);
+                }
             }
         });
     }
@@ -1375,6 +1625,7 @@ impl eframe::App for GuiApp {
         }
 
         self.handle_keys(&ctx);
+        self.assist_previous = self.assist.take();
         // Excel zooms with Ctrl + mouse wheel (⌘ + scroll on Mac).
         let zoom = ctx.input(|i| i.zoom_delta());
         if zoom != 1.0 {

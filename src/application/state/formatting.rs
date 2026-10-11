@@ -321,7 +321,6 @@ impl App {
         self.filter_column = Some(col);
         if let Some(ref criteria) = criteria {
             self.filter_value = Some(criteria.clone());
-            let criteria_lower = criteria.to_lowercase();
             // Find data extent
             let max_row = self.workbook.current_sheet().cells.keys()
                 .map(|&(r, _)| r)
@@ -329,7 +328,7 @@ impl App {
                 .unwrap_or(0);
             for row in 0..=max_row {
                 let cell = self.workbook.current_sheet().get_cell(row, col);
-                if !cell.value.to_lowercase().contains(&criteria_lower) {
+                if !filter_matches(&cell.value, criteria) {
                     self.hidden_rows.insert(row);
                 }
             }

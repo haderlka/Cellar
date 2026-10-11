@@ -16,7 +16,7 @@
 //!   - `web`           — GET (HTTP fetch) (1 fn)
 //!   - `dynamic_array` — SEQUENCE/FILTER/SORT/UNIQUE/TRANSPOSE/SUMPRODUCT (6 fns)
 //!   - `finance`       — FV/PV/NPV/PMT (4 fns)
-//!   - `viz`           — SPARKLINE (1 fn)
+//!   - `viz`           — SPARKLINE, HYPERLINK (2 fns)
 //!
 //! LAMBDA/MAP/REDUCE/BYROW/BYCOL/SCAN/MAKEARRAY are NOT here — they need the
 //! evaluator's lambda machinery and live in `parser/evaluator.rs`.

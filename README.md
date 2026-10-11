@@ -66,7 +66,49 @@ workbook in a `.cellar` file:
   macOS) toggles copy/series; double-click fills down alongside the
   neighbouring column; the *Auto Fill* button switches between Copy Cells,
   Fill Series, Fill Formatting Only and Fill Without Formatting.
-- Number formats, bold/underline, text and fill colours, sorting.
+- Number formats, bold/underline, text and fill colours; *Format Painter*
+  copies a cell's formatting onto others.
+- **Formula help**: while you type, matching functions and names are listed
+  (Tab inserts one) and the arguments of the current function are shown.
+  *Formulas → Trace Precedents / Dependents* draws arrows between cells,
+  *Show Formulas* (Ctrl+`) shows formulas instead of results, and the
+  *Name Manager* defines names; typing a new name into the name box names
+  the selection.
+- **Find and Replace** (Ctrl+F / Ctrl+H) with match case and regular
+  expressions, in values and inside formulas, *Go To* (Ctrl+G) for cells, ranges, names and tables, and
+  **comments** on cells (Shift+F2; a red corner marks them).
+- **Paste Special** (Ctrl+Alt+V): values, formulas or formats only, and
+  transpose. Ctrl+Shift+V pastes values.
+- **Freeze panes** (View): rows and columns that stay in place while the
+  rest scrolls.
+- Sheets can be duplicated, and reordered by dragging their tabs.
+- `=HYPERLINK("https://…", "text")` makes a link (Ctrl+click opens it) and
+  `=SPARKLINE(B2:M2)` or `=SPARKLINE(B2:M2, "column")` draws a small chart
+  in the cell.
+- *File → Print…* and *Export → PDF* turn the sheet into A4 pages.
+
+**Data**
+- **Tables** (*Format → Format as Table*, Ctrl+T): a header row with banded
+  rows, columns readable in formulas as `Sales[Price]`, growing as you type
+  below.
+- **Conditional formatting**: bold, underline and colours for the cells of a
+  column that are greater than, between, containing…, above average,
+  duplicates, the top 10, or matching your own formula. Compare with a
+  number, another cell (`C3`, fixed or in each row), a cell on another
+  sheet or a PivotTable value (`GETPIVOTDATA`).
+- **Sort** by one or several columns, keeping the header row; **Filter** a
+  column by a value, by text it contains or by a comparison (greater
+  than…); **Remove Duplicates**; **Text to Columns**.
+- **Data validation** per column: whole or decimal numbers within limits
+  (numbers or cells), a list of allowed values typed in or read from a
+  range, with a dropdown in the cell, a text length, or your own formula.
+- **Goal Seek**: find the input that makes a formula reach a value.
+- Dialogs that ask for a cell or range take it from the grid: click or drag
+  over the cells, as in Excel.
+
+All of these are stored with what a `.cellar` file already had: tables,
+rules and names are short entries per sheet, and links and sparklines are
+ordinary formulas.
 
 **PivotTables** (sidebar, Excel-style)
 - *PivotTable Fields* pane: field checkboxes, drag & drop between
@@ -172,6 +214,12 @@ Cellar uses Excel's shortcuts, and every menu item shows its shortcut.
 | Ctrl+Shift+= / Ctrl+- | Insert / delete (whole rows or columns when selected) |
 | Delete | Clear the selected cells |
 | Ctrl+C / X / V | Copy / cut / paste |
+| Ctrl+Alt+V / Ctrl+Shift+V | Paste Special / paste values |
+| Ctrl+F / Ctrl+H / Ctrl+G or F5 | Find / Replace / Go To |
+| Shift+F2 / Ctrl+K | Edit comment / insert link |
+| Ctrl+T / Ctrl+Shift+L | Format as Table / Filter |
+| Ctrl+` / Ctrl+F3 | Show formulas / Name Manager |
+| Ctrl+P | Print (opens the sheet as a PDF) |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+D / Ctrl+R | Fill down / fill right |
 | Ctrl+B / Ctrl+U | Bold / underline |
@@ -229,7 +277,7 @@ Formulas use Excel syntax: `=SUM(A1:A10)`, `=IF(B2>0, "yes", "no")`,
 | Finance | FV, NPV, PMT, PV |
 | Information | COUNT, COUNTA, ERROR.TYPE, ISBLANK, ISERR, ISERROR, ISNA, ISNUMBER, ISTEXT, NA, TYPE |
 | Dynamic arrays & lambdas | BYCOL, BYROW, FILTER, LAMBDA, LET, MAKEARRAY, MAP, REDUCE, SCAN, SEQUENCE, SORT, TRANSPOSE, UNIQUE |
-| Other | GET (fetch a URL), SPARKLINE |
+| Other | GET (fetch a URL), HYPERLINK, SPARKLINE |
 
 Excel error values (`#REF!`, `#N/A`, `#DIV/0!`, `#VALUE!`, `#NAME?`,
 `#NUM!`, `#NULL!`, `#SPILL!`) behave as in Excel, and formulas that would
@@ -240,7 +288,8 @@ create a circular reference are rejected.
 A `.cellar` file is JSON written in a canonical layout: keys sorted, cells
 sorted by position, one line per cell, default fields omitted. A workbook
 holds its sheets; each sheet has its `cells`, column widths, row heights, and — when
-present — `pivots` and `charts`:
+present — `tables`, `conditional_formats`, a `view_state` (frozen panes,
+hidden rows and columns, filter, validation rules), `pivots` and `charts`:
 
 ```json
 "pivots": [
@@ -255,7 +304,18 @@ present — `pivots` and `charts`:
 "charts": [
   {"pivot": "PivotTable1", "title": "Revenue by region", "type": "bar"}
 ],
+"tables": [
+  {"bottom_row": 6, "headers": ["Region", "Month", "Revenue"], "left_col": 0, "name": "Sales", "right_col": 2, "top_row": 0}
+],
+"conditional_formats": [
+  {"column": 2, "predicate": "_ > 1000", "style": {"bg_color": "LightGreen"}}
+],
 ```
+
+In a conditional format or validation rule, `_` stands for the cell's
+value and `ROW()` for its row. A filter's criteria reads like `SUMIF`'s:
+`=text`, `<>text`, `>100`, or plain text for "contains". Tables carry no styling of their own: every table is drawn the same
+way, so nothing about its look is saved.
 
 Formula cells also store their last computed value, so a file is readable
 without Cellar. tshts files use the same format: rename a `.tshts` file to
@@ -277,9 +337,9 @@ The code follows tshts' layered design:
 | Layer | Path | Contents |
 |---|---|---|
 | Domain | `src/domain/` | Cells, sheets, workbooks; formula parser and evaluator; dependency graph and parallel recalculation; PivotTable engine; Markdown export |
-| Application | `src/application/` | The editing session (`App`): undo/redo, clipboard, fill, formatting, pivots, charts, sheet commands |
-| Infrastructure | `src/infrastructure/` | `.cellar` files, Excel import/export, CSV, chart images, recent files, HTTP for `GET()` |
-| GUI | `src/gui/` | The egui app: window and menus, grid, sidebar, PivotTable UI, charts, dialogs |
+| Application | `src/application/` | The editing session (`App`): undo/redo, clipboard, fill, formatting, data tools (sort, filter, tables, names, goal seek…), pivots, charts, sheet commands |
+| Infrastructure | `src/infrastructure/` | `.cellar` files, Excel import/export, CSV, PDF export, chart images, recent files, HTTP for `GET()` |
+| GUI | `src/gui/` | The egui app: window and menus, grid, sidebar, PivotTable UI, charts, dialogs, formula help |
 
 The scenario tests in `tests/` type complete financial models (DCF,
 amortization, tax brackets, FIFO inventory…) into a workbook and compare

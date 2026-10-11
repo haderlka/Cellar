@@ -261,7 +261,9 @@ impl App {
         self.apply_plan(cells)
     }
 
-    fn apply_plan(&mut self, cells: Vec<(usize, usize, Option<CellData>)>) -> usize {
+    /// Write (or clear, for `None`) the cells that differ from what is
+    /// stored, as one undo step. Returns how many changed.
+    pub(super) fn apply_plan(&mut self, cells: Vec<(usize, usize, Option<CellData>)>) -> usize {
         let mut batch = Vec::new();
         let mut writes = Vec::new();
         let mut clears = Vec::new();

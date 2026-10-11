@@ -26,11 +26,15 @@
 mod app;
 mod charts;
 mod dialogs;
+mod formula_help;
 mod grid;
 mod open_files;
 mod pivot_ui;
 mod shortcuts;
 mod sidebar;
+#[cfg(test)]
+mod smoke;
+mod tools;
 
 use eframe::egui;
 use cellar::infrastructure::{atomic, chart_image, fetcher, import, uninstall, FileRepository};

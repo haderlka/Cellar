@@ -502,7 +502,7 @@ pub fn builtin_function_names() -> Vec<&'static str> {
         "CHAR", "CODE", "TEXT", "VALUE", "NUMBERVALUE",
         "IFERROR", "IFNA", "ISERROR", "ISERR", "ISNA", "NA", "ERROR.TYPE",
         "ISBLANK", "ISNUMBER", "ISTEXT", "TYPE", "COUNT", "COUNTA",
-        "SPARKLINE",
+        "SPARKLINE", "HYPERLINK",
         "SUMIF", "COUNTIF", "AVERAGEIF",
         "VLOOKUP", "HLOOKUP", "XLOOKUP", "INDEX", "MATCH",
         "TRUE", "FALSE",
@@ -570,8 +570,11 @@ pub fn criteria_matches(value: &Value, criteria: &str) -> bool {
             _ => {}
         }
     }
-    // String comparison with optional wildcards
-    let s = value.to_string();
+    // String comparison with optional wildcards. Excel's criteria ignore
+    // case: COUNTIF(range, "closed") counts "Closed".
+    let s = value.to_string().to_lowercase();
+    let rest = rest.to_lowercase();
+    let rest = rest.as_str();
     match op {
         "=" => glob_match(&s, rest),
         "<>" => !glob_match(&s, rest),

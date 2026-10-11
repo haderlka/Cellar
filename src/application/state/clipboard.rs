@@ -6,7 +6,7 @@ impl App {
     /// Stored cells inside `range`, row-major. Sheets are sparse; walking
     /// the rectangle instead would be a billion lookups for Select All on
     /// a large sheet.
-    fn stored_cells_in(&self, ((r0, c0), (r1, c1)): ((usize, usize), (usize, usize))) -> Vec<(usize, usize)> {
+    pub(super) fn stored_cells_in(&self, ((r0, c0), (r1, c1)): ((usize, usize), (usize, usize))) -> Vec<(usize, usize)> {
         let mut keys: Vec<(usize, usize)> = self
             .workbook
             .current_sheet()
@@ -153,7 +153,9 @@ impl App {
         }
     }
 
-    pub fn paste(&mut self) {
+    /// Cells copied in Cellar (this or another window) travel in a
+    /// sidecar file, announced by a sentinel on the system clipboard.
+    pub(super) fn refresh_clipboard_from_system(&mut self) {
         // If the system clipboard has our sentinel header, load the matching
         // sidecar JSON (preserves formulas/formats/comments). Otherwise fall
         // back to internal clipboard, then plain-text TSV.
@@ -171,6 +173,10 @@ impl App {
                                                 };
                             self.clipboard = Some(cb);
                         }
+    }
+
+    pub fn paste(&mut self) {
+        self.refresh_clipboard_from_system();
         let clipboard = if let Some(ref cb) = self.clipboard {
             cb.clone()
         } else {

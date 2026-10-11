@@ -182,6 +182,15 @@ pub struct ConditionalFormat {
     pub style: CellStyle,
 }
 
+/// A row or column inserted or deleted at an index.
+#[derive(Clone, Copy)]
+enum StructuralEdit {
+    InsertRow(usize),
+    DeleteRow(usize),
+    InsertCol(usize),
+    DeleteCol(usize),
+}
+
 fn default_rows() -> usize { 100 }
 fn default_cols() -> usize { 26 }
 fn default_column_width() -> usize { 8 }
@@ -802,6 +811,7 @@ impl Spreadsheet {
         self.cells = new_cells;
         self.rows += 1;
         self.row_heights = self.row_heights.drain().map(|(r, h)| (if r >= at { r + 1 } else { r }, h)).collect();
+        self.shift_tables(StructuralEdit::InsertRow(at));
 
         // Adjust formula references in all cells
         let updates = {
@@ -863,6 +873,7 @@ impl Spreadsheet {
             .filter(|&(r, _)| r != at)
             .map(|(r, h)| (if r > at { r - 1 } else { r }, h))
             .collect();
+        self.shift_tables(StructuralEdit::DeleteRow(at));
 
         // Adjust formula references
         let updates = {
@@ -916,6 +927,7 @@ impl Spreadsheet {
 
         self.cells = new_cells;
         self.cols += 1;
+        self.shift_tables(StructuralEdit::InsertCol(at));
 
         // Shift column widths
         let mut new_widths = std::collections::HashMap::new();
@@ -982,6 +994,7 @@ impl Spreadsheet {
 
         self.cells = new_cells;
         if self.cols > 1 { self.cols -= 1; }
+        self.shift_tables(StructuralEdit::DeleteCol(at));
 
         // Shift column widths
         let mut new_widths = std::collections::HashMap::new();
@@ -1046,6 +1059,11 @@ impl Spreadsheet {
         }
         let registry = FunctionRegistry::shared_builtin();
         self.conditional_formats.iter().any(|rule| {
+            // A rule comparing with another sheet or a PivotTable changes
+            // when those do, and edits there don't touch this sheet's cache.
+            if rule.predicate.contains('!') || rule.predicate.to_uppercase().contains("GETPIVOTDATA") {
+                return true;
+            }
             // Substitute the `_` placeholder with a harmless literal so
             // the predicate parses; we only care about which functions
             // it calls, not the value it produces.
@@ -1060,10 +1078,177 @@ impl Spreadsheet {
         })
     }
 
+    /// Tables and conditional-format rules follow rows and columns that
+    /// are inserted or deleted, like cells do. A table whose header row or
+    /// last column is deleted is dropped, as is a rule on a deleted column.
+    fn shift_tables(&mut self, edit: StructuralEdit) {
+        match edit {
+            StructuralEdit::InsertRow(at) => {
+                for t in &mut self.tables {
+                    if at <= t.top_row {
+                        t.top_row += 1;
+                        t.bottom_row += 1;
+                    } else if at <= t.bottom_row {
+                        t.bottom_row += 1;
+                    }
+                }
+            }
+            StructuralEdit::DeleteRow(at) => {
+                self.tables.retain(|t| at != t.top_row);
+                for t in &mut self.tables {
+                    if at < t.top_row {
+                        t.top_row -= 1;
+                        t.bottom_row -= 1;
+                    } else if at <= t.bottom_row {
+                        t.bottom_row -= 1;
+                    }
+                }
+            }
+            StructuralEdit::InsertCol(at) => {
+                for t in &mut self.tables {
+                    if at <= t.left_col {
+                        t.left_col += 1;
+                        t.right_col += 1;
+                    } else if at <= t.right_col {
+                        t.right_col += 1;
+                        t.headers.insert((at - t.left_col).min(t.headers.len()), Self::column_label(at));
+                    }
+                }
+                for rule in &mut self.conditional_formats {
+                    if rule.column >= at {
+                        rule.column += 1;
+                    }
+                }
+            }
+            StructuralEdit::DeleteCol(at) => {
+                self.tables.retain(|t| !(t.left_col == t.right_col && at == t.left_col));
+                for t in &mut self.tables {
+                    if at < t.left_col {
+                        t.left_col -= 1;
+                        t.right_col -= 1;
+                    } else if at <= t.right_col {
+                        t.right_col -= 1;
+                        if at - t.left_col < t.headers.len() {
+                            t.headers.remove(at - t.left_col);
+                        }
+                    }
+                }
+                self.conditional_formats.retain(|rule| rule.column != at);
+                for rule in &mut self.conditional_formats {
+                    if rule.column > at {
+                        rule.column -= 1;
+                    }
+                }
+            }
+        }
+        self.cf_cache.lock().unwrap().clear();
+    }
+
+    /// The table covering `(row, col)`, if any.
+    pub fn table_at(&self, row: usize, col: usize) -> Option<&Table> {
+        self.tables
+            .iter()
+            .find(|t| (t.top_row..=t.bottom_row).contains(&row) && (t.left_col..=t.right_col).contains(&col))
+    }
+
+    /// How a table draws the cell: a filled header row with white bold
+    /// titles, and every second row below it shaded. Tables store no
+    /// styling of their own; every table looks the same.
+    pub fn table_style_for(&self, row: usize, col: usize) -> Option<CellStyle> {
+        let t = self.table_at(row, col)?;
+        if row == t.top_row {
+            Some(CellStyle {
+                bold: true,
+                fg_color: Some(TerminalColor::White),
+                bg_color: Some(TerminalColor::Blue),
+                ..CellStyle::default()
+            })
+        } else if (row - t.top_row).is_multiple_of(2) {
+            Some(CellStyle { bg_color: Some(TerminalColor::LightBlue), ..CellStyle::default() })
+        } else {
+            None
+        }
+    }
+
+    /// The style a cell is shown with: its table's look, then its own
+    /// formatting, then any conditional format that applies.
+    pub fn display_style(&self, row: usize, col: usize) -> CellStyle {
+        let mut style = self.table_style_for(row, col).unwrap_or_default();
+        if let Some(format) = self.cells.get(&(row, col)).and_then(|cd| cd.format.as_ref()) {
+            style = layer_style(style, &format.style);
+        }
+        if let Some(conditional) = self.conditional_style_for(row, col) {
+            style = layer_style(style, &conditional);
+        }
+        style
+    }
+
+    /// Excel's "current region": the block of data around `(row, col)`,
+    /// bounded by empty rows and columns.
+    pub fn current_region(&self, row: usize, col: usize) -> ((usize, usize), (usize, usize)) {
+        let filled = |r: usize, c: usize| self.cells.get(&(r, c)).is_some_and(|cd| !cd.value.is_empty() || cd.formula.is_some());
+        let (mut r0, mut c0, mut r1, mut c1) = (row, col, row, col);
+        loop {
+            let (lo_c, hi_c) = (c0.saturating_sub(1), (c1 + 1).min(self.cols.saturating_sub(1)));
+            let (lo_r, hi_r) = (r0.saturating_sub(1), (r1 + 1).min(self.rows.saturating_sub(1)));
+            let row_has = |r: usize| (lo_c..=hi_c).any(|c| filled(r, c));
+            let col_has = |c: usize| (lo_r..=hi_r).any(|r| filled(r, c));
+            if r0 > 0 && row_has(r0 - 1) {
+                r0 -= 1;
+            } else if r1 + 1 < self.rows && row_has(r1 + 1) {
+                r1 += 1;
+            } else if c0 > 0 && col_has(c0 - 1) {
+                c0 -= 1;
+            } else if c1 + 1 < self.cols && col_has(c1 + 1) {
+                c1 += 1;
+            } else {
+                return ((r0, c0), (r1, c1));
+            }
+        }
+    }
+
+    /// Whether `predicate` (a formula without `=`, with `_` standing for
+    /// the value) holds for `value`. Conditional formats and data
+    /// validation share this. An error result counts as "doesn't hold".
+    ///
+    /// The predicate may read other cells (`_ < C3`). Other sheets and
+    /// PivotTables (`_ > Limits!B2`, `_ > GETPIVOTDATA(…)`) resolve when
+    /// the call is made inside `with_recalc_context`, as the GUI does.
+    pub fn predicate_holds(&self, predicate: &str, value: &str) -> bool {
+        self.predicate_holds_at(predicate, value, None)
+    }
+
+    /// [`Self::predicate_holds`] for the cell in `row`: `ROW()` in the
+    /// predicate is that row's number, so a rule can compare each cell
+    /// with one in its own row: `_ < INDIRECT("C" & ROW())`.
+    pub fn predicate_holds_at(&self, predicate: &str, value: &str, row: Option<usize>) -> bool {
+        use crate::domain::services::FormulaEvaluator;
+        let token_value = if value.parse::<f64>().is_ok() {
+            value.to_string()
+        } else {
+            format!("\"{}\"", value.replace('"', "\"\""))
+        };
+        let formula = format!("={}", bind_placeholder(predicate, &token_value, row));
+        let v = super::workbook::with_workbook_context(|wb| {
+            let mut evaluator = FormulaEvaluator::new(self);
+            if !self.named_ranges.is_empty() {
+                evaluator = evaluator.with_names(&self.named_ranges);
+            }
+            if let Some(wb) = wb {
+                evaluator = evaluator.with_workbook(wb);
+            }
+            evaluator.evaluate_formula(&formula)
+        });
+        match v.as_str() {
+            "" | "0" | "FALSE" => false,
+            _ if v.starts_with('#') => false,
+            _ => v.parse::<f64>().map(|n| n != 0.0).unwrap_or(true),
+        }
+    }
+
     /// `_` in the predicate is replaced with the cell's value (quoted if
     /// non-numeric) before evaluation.
     pub fn conditional_style_for(&self, row: usize, col: usize) -> Option<CellStyle> {
-        use crate::domain::services::FormulaEvaluator;
         if self.conditional_formats.is_empty() {
             return None;
         }
@@ -1078,23 +1263,7 @@ impl Spreadsheet {
             if rule.column != col {
                 continue;
             }
-            let token_value = if value.parse::<f64>().is_ok() {
-                value.clone()
-            } else {
-                format!("\"{}\"", value.replace('"', "\"\""))
-            };
-            let bound = rule.predicate.replace('_', &token_value);
-            let formula = format!("={}", bound);
-            let evaluator = if self.named_ranges.is_empty() {
-                FormulaEvaluator::new(self)
-            } else {
-                FormulaEvaluator::new(self).with_names(&self.named_ranges)
-            };
-            let v = evaluator.evaluate_formula(&formula);
-            let truthy = match v.as_str() {
-                "" | "0" | "FALSE" | "#ERROR" => false,
-                _ => v.parse::<f64>().map(|n| n != 0.0).unwrap_or(true),
-            };
+            let truthy = self.predicate_holds_at(&rule.predicate, value, Some(row));
             if truthy {
                 result = Some(layer_style(result.unwrap_or_default(), &rule.style));
             }
@@ -1146,6 +1315,38 @@ where
     }
 
     deserializer.deserialize_seq(CellsVisitor)
+}
+
+/// Replace the `_` placeholders of a predicate with `value`, and `ROW()`
+/// with the 1-based number of `row` when one is given. Only a `_` standing
+/// alone counts: not one inside a quoted string or inside a name such as
+/// `TAX_RATE`.
+fn bind_placeholder(predicate: &str, value: &str, row: Option<usize>) -> String {
+    let chars: Vec<char> = predicate.chars().collect();
+    let part_of_name = |c: Option<&char>| c.is_some_and(|c| c.is_alphanumeric() || *c == '_' || *c == '.');
+    let before = |i: usize| i.checked_sub(1).and_then(|p| chars.get(p));
+    let mut out = String::with_capacity(predicate.len() + value.len());
+    let mut in_string = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '"' {
+            in_string = !in_string;
+        }
+        let is_row_call = chars.get(i..i + 5).is_some_and(|w| w.iter().collect::<String>().eq_ignore_ascii_case("ROW()"));
+        if let Some(row) = row.filter(|_| !in_string && is_row_call && !part_of_name(before(i))) {
+            out.push_str(&(row + 1).to_string());
+            i += 5;
+            continue;
+        }
+        if ch == '_' && !in_string && !part_of_name(before(i)) && !part_of_name(chars.get(i + 1)) {
+            out.push_str(value);
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+    out
 }
 
 fn layer_style(base: CellStyle, over: &CellStyle) -> CellStyle {

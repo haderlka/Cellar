@@ -9,9 +9,7 @@ use super::super::{App, parse_range};
 use crate::domain::{CellData, FormulaEvaluator, Spreadsheet};
 
 impl App {
-    /// `:table create A1:D10 [name=Sales]` — register a named table over
-    /// the range. Each column also gets a `Table[Col]` named range so
-    /// structured references resolve via the existing name machinery.
+    /// `:table create A1:D10 [name=Sales]` — see [`App::add_table`].
     pub(super) fn cmd_table_create(&mut self, range_str: &str, opts: &[&str], trimmed: &str) {
         let Some((start, end)) = parse_range(range_str) else {
             self.status_message = Some(format!("Invalid range: {}", range_str));
@@ -34,52 +32,12 @@ impl App {
                 }
             }
         }
-        let sheet = self.workbook.current_sheet();
-        let cols = end.1 - start.1 + 1;
-        let mut headers = Vec::with_capacity(cols);
-        for c in start.1..=end.1 {
-            let h = sheet.get_cell(start.0, c).value;
-            headers.push(if h.is_empty() {
-                Spreadsheet::column_label(c)
-            } else {
-                h
-            });
+        if let Err(e) = self.add_table((start, end), &name) {
+            self.status_message = Some(e);
         }
-        let table = crate::domain::Table {
-            name: name.clone(),
-            top_row: start.0,
-            left_col: start.1,
-            bottom_row: end.0,
-            right_col: end.1,
-            headers,
-        };
-        self.workbook.current_sheet_mut().tables.push(table);
-        // Also register each column as a named range so `Table1[Col1]`
-        // works via existing name resolution.
-        let sheet = self.workbook.current_sheet();
-        let table = sheet.tables.last().unwrap().clone();
-        let body_top = table.top_row + 1; // skip header row
-        for (i, header) in table.headers.iter().enumerate() {
-            let key = format!("{}[{}]", table.name.to_uppercase(), header.to_uppercase());
-            let value = format!(
-                "{}:{}",
-                Spreadsheet::format_cell_reference(body_top, table.left_col + i, false, false),
-                Spreadsheet::format_cell_reference(table.bottom_row, table.left_col + i, false, false),
-            );
-            self.workbook.named_ranges.insert(key.clone(), value.clone());
-            for s in &mut self.workbook.sheets {
-                s.named_ranges.insert(key.clone(), value.clone());
-            }
-        }
-        self.dirty = true;
-        self.status_message = Some(format!("Created table '{}'", name));
     }
 
-    /// `:goalseek TARGET_CELL EXPECTED INPUT_CELL` — bisect the input cell
-    /// until the target cell evaluates to (approximately) the expected
-    /// value. Runs on a workbook clone to keep ~80 probe writes from
-    /// rippling through real cross-sheet dependents; only the converged
-    /// value lands via `set_cell_with_undo`.
+    /// `:goalseek TARGET_CELL EXPECTED INPUT_CELL` — see [`App::goal_seek`].
     pub(super) fn cmd_goalseek(&mut self, target: &str, expected: &str, input: &str) {
         let target_pos = Spreadsheet::parse_cell_reference(target);
         let input_pos = Spreadsheet::parse_cell_reference(input);
@@ -88,49 +46,10 @@ impl App {
             self.status_message = Some("goalseek: bad cell reference".to_string());
             return;
         };
-        let mut scratch = self.workbook.clone();
-        let active_idx = scratch.active_sheet;
-        let mut lo = -1e9_f64;
-        let mut hi = 1e9_f64;
-        let mut result: Option<f64> = None;
-        for _ in 0..80 {
-            let mid = (lo + hi) / 2.0;
-            let cell = CellData {
-                value: mid.to_string(),
-                formula: None,
-                format: None,
-                comment: None,
-                spill_anchor: None,
-            };
-            scratch.sheets[active_idx].set_cell(i.0, i.1, cell);
-            let cur: f64 = scratch.sheets[active_idx]
-                .get_cell(t.0, t.1)
-                .value
-                .parse()
-                .unwrap_or(0.0);
-            if (cur - expected_v).abs() < 1e-6 {
-                result = Some(mid);
-                break;
-            }
-            if cur < expected_v {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        if let Some(v) = result {
-            let final_cell = CellData {
-                value: v.to_string(),
-                formula: None,
-                format: None,
-                comment: None,
-                spill_anchor: None,
-            };
-            self.set_cell_with_undo(i.0, i.1, final_cell);
-            self.status_message = Some(format!("Goal seek: {} = {:.6}", input, v));
-        } else {
-            self.status_message = Some("Goal seek did not converge".to_string());
-        }
+        self.status_message = Some(match self.goal_seek(t, expected_v, i) {
+            Ok(v) => format!("Goal seek: {} = {:.6}", input, v),
+            Err(e) => e,
+        });
     }
 }
 

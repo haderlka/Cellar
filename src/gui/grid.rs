@@ -8,7 +8,10 @@ use eframe::egui::{
     StrokeKind, TextEdit, Ui,
 };
 use eframe::egui::text::{LayoutJob, TextFormat};
-use cellar::domain::{format_cell_value, formula_references, CellData, CellStyle, FormulaRef, Spreadsheet, TerminalColor};
+use cellar::domain::{
+    format_cell_value, formula_references, CellData, CellStyle, FormulaRef, Spreadsheet, TerminalColor, Workbook,
+};
+use std::collections::HashSet;
 
 use cellar::application::{fill_target, CellRange, FillMode, FillTarget};
 
@@ -81,7 +84,6 @@ pub fn formula_layout_job(text: &str, font: FontId, color: Color32) -> LayoutJob
     job
 }
 
-#[derive(Default)]
 pub struct GridState {
     /// Scroll so the cursor cell (or `scroll_target`) is visible.
     pub scroll_to_cursor: bool,
@@ -94,8 +96,24 @@ pub struct GridState {
     /// still selected.
     last_fill: Option<LastFill>,
     /// Widgets drawn over the grid last frame (cell editor, Auto Fill
-    /// button). Presses on them must not reach the grid underneath.
-    overlays: Vec<Rect>,
+    /// button, formula suggestions). Presses on them must not reach the
+    /// grid underneath.
+    pub overlays: Vec<Rect>,
+    /// The grid's viewport on screen this frame.
+    screen: Rect,
+}
+
+impl Default for GridState {
+    fn default() -> Self {
+        Self {
+            scroll_to_cursor: false,
+            scroll_target: None,
+            drag: None,
+            last_fill: None,
+            overlays: Vec::new(),
+            screen: Rect::NOTHING,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -149,10 +167,14 @@ struct Layout {
     /// `extra[k]`: how much taller than `ROW_H` the rows `tall[..k]` are
     /// together; `extra[tall.len()]` is the total.
     extra: Vec<f32>,
+    /// Frozen panes: columns `..frozen_cols` and display rows
+    /// `..frozen_idx` stay put while the rest scrolls under them.
+    frozen_cols: usize,
+    frozen_idx: usize,
 }
 
 impl Layout {
-    fn new(sheet: &Spreadsheet, gui: &GuiApp) -> Self {
+    fn new(sheet: &Spreadsheet, gui: &GuiApp, available: egui::Vec2) -> Self {
         let mut col_x = Vec::with_capacity(sheet.cols + 1);
         let mut x = 0.0;
         for c in 0..sheet.cols {
@@ -164,7 +186,8 @@ impl Layout {
         col_x.push(x);
         let visible_rows = (!gui.app.hidden_rows.is_empty())
             .then(|| (0..sheet.rows).filter(|r| !gui.app.hidden_rows.contains(r)).collect());
-        let mut layout = Self { col_x, visible_rows, rows: sheet.rows, tall: Vec::new(), extra: vec![0.0] };
+        let mut layout =
+            Self { col_x, visible_rows, rows: sheet.rows, tall: Vec::new(), extra: vec![0.0], frozen_cols: 0, frozen_idx: 0 };
         let mut tall: Vec<(usize, f32)> = sheet
             .row_heights
             .iter()
@@ -177,7 +200,75 @@ impl Layout {
             layout.extra.push(sum);
         }
         layout.tall = tall;
+        // Panes frozen so large that nothing could scroll are shown unfrozen.
+        let frozen_cols = gui.app.frozen_cols.min(layout.cols());
+        if layout.col_x[frozen_cols] < (available.x - ROW_HEADER_W) * 0.8 {
+            layout.frozen_cols = frozen_cols;
+        }
+        let frozen_idx = match &layout.visible_rows {
+            Some(v) => v.partition_point(|&r| r < gui.app.frozen_rows),
+            None => gui.app.frozen_rows.min(layout.rows),
+        };
+        if layout.row_y(frozen_idx) < (available.y - HEADER_H) * 0.8 {
+            layout.frozen_idx = frozen_idx;
+        }
         layout
+    }
+
+    fn frozen_w(&self) -> f32 {
+        self.col_x[self.frozen_cols]
+    }
+
+    fn frozen_h(&self) -> f32 {
+        self.row_y(self.frozen_idx)
+    }
+
+    /// Screen area of one of the four panes the freeze lines divide the
+    /// body into. Cells are clipped to their pane.
+    fn pane(&self, screen: Rect, frozen_row: bool, frozen_col: bool) -> Rect {
+        let (bx, by) = (screen.min.x + ROW_HEADER_W, screen.min.y + HEADER_H);
+        let (fx, fy) = (bx + self.frozen_w(), by + self.frozen_h());
+        Rect::from_min_max(
+            pos2(if frozen_col { bx } else { fx }, if frozen_row { by } else { fy }),
+            pos2(if frozen_col { fx } else { screen.max.x.max(fx) }, if frozen_row { fy } else { screen.max.y.max(fy) }),
+        )
+    }
+
+    fn pane_of(&self, screen: Rect, row_idx: usize, col: usize) -> Rect {
+        self.pane(screen, row_idx < self.frozen_idx, col < self.frozen_cols)
+    }
+
+    /// Body-relative position under screen point `p`: frozen panes don't
+    /// scroll, so they map straight from the screen.
+    fn body_pos(&self, origin: Pos2, screen: Rect, p: Pos2) -> (f32, f32) {
+        let (sx, sy) = (p.x - screen.min.x - ROW_HEADER_W, p.y - screen.min.y - HEADER_H);
+        (
+            if sx < self.frozen_w() { sx } else { p.x - origin.x - ROW_HEADER_W },
+            if sy < self.frozen_h() { sy } else { p.y - origin.y - HEADER_H },
+        )
+    }
+
+    /// The parts of `range` in each pane, as (pane, screen rect).
+    fn range_parts(&self, origin: Pos2, screen: Rect, ((r0, c0), (r1, c1)): CellRange) -> Vec<(Rect, Rect)> {
+        let mut parts = Vec::new();
+        let Some((a, b)) = self.display_span(r0.min(r1), r0.max(r1)) else { return parts };
+        let Some(last_col) = self.cols().checked_sub(1) else { return parts };
+        let (ca, cb) = (c0.min(c1), c0.max(c1).min(last_col));
+        if ca > last_col {
+            return parts;
+        }
+        let split = |lo: usize, hi: usize, at: usize| {
+            let frozen = (lo < at).then(|| (lo, hi.min(at.saturating_sub(1))));
+            let scrolling = (hi >= at).then(|| (lo.max(at), hi));
+            [frozen, scrolling]
+        };
+        for (ra, rb) in split(a, b, self.frozen_idx).into_iter().flatten() {
+            for (xa, xb) in split(ca, cb, self.frozen_cols).into_iter().flatten() {
+                let rect = self.cell_rect(origin, screen, ra, xa).union(self.cell_rect(origin, screen, rb, xb));
+                parts.push((self.pane_of(screen, ra, xa), rect));
+            }
+        }
+        parts
     }
 
     /// Top of display row `idx`, relative to the body (`idx` may be
@@ -263,10 +354,14 @@ impl Layout {
         *self.col_x.last().unwrap_or(&0.0)
     }
 
-    /// Screen rect of display row `row_idx`, column `col`.
-    fn cell_rect(&self, origin: Pos2, row_idx: usize, col: usize) -> Rect {
+    /// Screen rect of display row `row_idx`, column `col`. Frozen rows
+    /// and columns are placed from the viewport, the rest from the
+    /// scrolled content's `origin`.
+    fn cell_rect(&self, origin: Pos2, screen: Rect, row_idx: usize, col: usize) -> Rect {
+        let x0 = if col < self.frozen_cols { screen.min.x } else { origin.x };
+        let y0 = if row_idx < self.frozen_idx { screen.min.y } else { origin.y };
         Rect::from_min_size(
-            pos2(origin.x + ROW_HEADER_W + self.col_x[col], origin.y + HEADER_H + self.row_y(row_idx)),
+            pos2(x0 + ROW_HEADER_W + self.col_x[col], y0 + HEADER_H + self.row_y(row_idx)),
             vec2(self.col_x[col + 1] - self.col_x[col], self.row_h(row_idx)),
         )
     }
@@ -276,7 +371,7 @@ impl GuiApp {
     pub fn show_grid(&mut self, ui: &mut Ui) {
         self.clamp_selection();
         let sheet_idx = self.app.workbook.active_sheet;
-        let layout = Layout::new(self.app.workbook.current_sheet(), self);
+        let layout = Layout::new(self.app.workbook.current_sheet(), self, ui.available_size());
         let content = vec2(
             ROW_HEADER_W + layout.width(),
             HEADER_H + layout.height(),
@@ -289,10 +384,12 @@ impl GuiApp {
                 ui.set_min_size(content);
                 let origin = ui.min_rect().min;
                 let screen = viewport.translate(origin.to_vec2());
-                let cell_rect = |row_idx: usize, col: usize| layout.cell_rect(origin, row_idx, col);
+                self.grid.screen = screen;
+                let cell_rect = |row_idx: usize, col: usize| layout.cell_rect(origin, screen, row_idx, col);
 
                 // Keep the cursor visible after keyboard moves. Expand the
-                // target by the header size so it isn't hidden under them.
+                // target by the header (and frozen pane) size so it isn't
+                // hidden under them. Frozen cells are always in view.
                 if self.grid.scroll_to_cursor {
                     self.grid.scroll_to_cursor = false;
                     let (r, c) = self
@@ -303,9 +400,11 @@ impl GuiApp {
                         && c < layout.cols()
                     {
                         let rect = cell_rect(idx, c);
+                        let pad_x = if c < layout.frozen_cols { 0.0 } else { ROW_HEADER_W + layout.frozen_w() };
+                        let pad_y = if idx < layout.frozen_idx { 0.0 } else { HEADER_H + layout.frozen_h() };
                         let padded = Rect::from_min_max(
-                            rect.min - vec2(ROW_HEADER_W, HEADER_H),
-                            rect.max + vec2(4.0, 4.0),
+                            rect.min - vec2(pad_x, pad_y),
+                            rect.max + vec2(if pad_x > 0.0 { 4.0 } else { 0.0 }, if pad_y > 0.0 { 4.0 } else { 0.0 }),
                         );
                         ui.scroll_to_rect(padded, None);
                     }
@@ -318,6 +417,8 @@ impl GuiApp {
                 self.cell_editor(ui, &layout, &cell_rect, screen);
                 self.fill_drag_preview(ui, &layout, &cell_rect);
                 self.auto_fill_options(ui, &layout, &cell_rect);
+                self.validation_dropdown(ui, &layout, &cell_rect, screen);
+                self.cell_hover(ui, &layout, origin, screen, &response);
                 response.context_menu(|ui| self.grid_context_menu(ui));
             });
     }
@@ -326,6 +427,11 @@ impl GuiApp {
     /// redo shrink the sheet without touching the selection, and the grid
     /// indexes column geometry by the selection's columns.
     fn clamp_selection(&mut self) {
+        // Tracer arrows belong to the cell they were asked for.
+        let at = (self.app.workbook.active_sheet, (self.app.selected_row, self.app.selected_col));
+        if self.tools.trace.as_ref().is_some_and(|t| (t.sheet, t.cell) != at) {
+            self.tools.trace = None;
+        }
         let sheet = self.app.workbook.current_sheet();
         let (last_row, last_col) = (sheet.rows.saturating_sub(1), sheet.cols.saturating_sub(1));
         let clamp = |p: &mut Option<(usize, usize)>| {
@@ -351,7 +457,10 @@ impl GuiApp {
         if c1 >= layout.cols() {
             return None;
         }
-        Some(Rect::from_center_size(cell_rect(idx, c1).max, vec2(HANDLE, HANDLE)))
+        let corner = cell_rect(idx, c1).max;
+        // Not when the corner is scrolled under a frozen pane.
+        let pane = layout.pane_of(self.grid.screen, idx, c1);
+        pane.expand(HANDLE).contains(corner).then(|| Rect::from_center_size(corner, vec2(HANDLE, HANDLE)))
     }
 
     fn range_rect(layout: &Layout, cell_rect: &dyn Fn(usize, usize) -> Rect, ((ra, ca), (rb, cb)): CellRange) -> Option<Rect> {
@@ -457,6 +566,43 @@ impl GuiApp {
         }
     }
 
+    /// Excel's in-cell dropdown: when the cursor's column only allows a
+    /// list of values (Data → Data Validation), a button beside the cell
+    /// offers them.
+    fn validation_dropdown(&mut self, ui: &mut Ui, layout: &Layout, cell_rect: &dyn Fn(usize, usize) -> Rect, screen: Rect) {
+        if self.edit.is_some() || self.grid.drag.is_some() {
+            return;
+        }
+        let (row, col) = (self.app.selected_row, self.app.selected_col);
+        let Some(choices) = self.app.validation_choices(col) else { return };
+        let Some(idx) = layout.index_of(row).filter(|_| col < layout.cols()) else { return };
+        let cell = cell_rect(idx, col);
+        if !layout.pane_of(screen, idx, col).intersects(cell) {
+            return;
+        }
+        let rect = Rect::from_min_size(cell.right_top() + vec2(1.0, 0.0), vec2(18.0, cell.height()));
+        let resp = ui.put(rect, egui::Button::new(""));
+        self.grid.overlays.push(rect);
+        let a = rect.center() + vec2(-3.5, -2.0);
+        let arrow = vec![a, a + vec2(7.0, 0.0), a + vec2(3.5, 4.0)];
+        ui.painter().add(egui::Shape::convex_polygon(arrow, ui.visuals().text_color(), Stroke::NONE));
+        let mut chosen = None;
+        egui::Popup::menu(&resp).show(|ui| {
+            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                for choice in &choices {
+                    if ui.button(choice).clicked() {
+                        chosen = Some(choice.clone());
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if let Some(value) = chosen {
+            self.start_edit(Some(value), true);
+            self.commit_edit(EditMove::Stay);
+        }
+    }
+
     fn paint(
         &self,
         ui: &Ui,
@@ -478,73 +624,112 @@ impl GuiApp {
         let font = FontId::proportional(FONT_SIZE);
         painter.rect_filled(screen, 0.0, bg);
 
-        let sheet = self.app.workbook.current_sheet();
+        let wb = &self.app.workbook;
+        let sheet = wb.current_sheet();
         if layout.cols() == 0 || layout.row_count() == 0 {
             return;
         }
-        let c0 = layout.col_at(viewport.min.x - ROW_HEADER_W);
+        // Visible rows and columns: the frozen ones, then those scrolled
+        // into view beside them.
+        let (fc, fr) = (layout.frozen_cols, layout.frozen_idx);
+        let c0 = layout.col_at(viewport.min.x + layout.frozen_w() - ROW_HEADER_W).max(fc);
         let c1 = layout.col_at(viewport.max.x - ROW_HEADER_W);
-        let r0 = layout.row_idx_at(viewport.min.y - HEADER_H);
+        let r0 = layout.row_idx_at(viewport.min.y + layout.frozen_h() - HEADER_H).max(fr);
         let r1 = (layout.row_idx_at(viewport.max.y) + 2).min(layout.row_count());
-
-        // Cells.
-        for idx in r0..r1 {
-            let row = layout.row_at(idx);
-            for col in c0..=c1 {
-                let rect = cell_rect(idx, col);
-                if rect.width() <= 0.0 {
-                    continue;
-                }
-                if let Some(cd) = sheet.cells.get(&(row, col)) {
-                    let cf = sheet.conditional_style_for(row, col);
-                    draw_cell(&painter, rect, cd, cf, &font, text, dark);
-                }
-            }
-        }
-
-        // Grid lines.
+        let row_groups = [(true, 0..fr), (false, r0..r1.max(r0))];
+        let col_groups = [(true, 0..fc), (false, c0..(c1 + 1).max(c0))];
         let body_top = screen.min.y + HEADER_H;
         let body_left = screen.min.x + ROW_HEADER_W;
-        for col in c0..=c1 + 1 {
-            if col > layout.cols() {
-                break;
+        let (fx, fy) = (body_left + layout.frozen_w(), body_top + layout.frozen_h());
+
+        // Cells.
+        let found: HashSet<(usize, usize)> = match &self.tools.find {
+            Some(_) => self.app.find_replace_results.iter().copied().collect(),
+            None => HashSet::new(),
+        };
+        let has_tables = !sheet.tables.is_empty();
+        let look = CellLook { font: &font, text, dark, show_formulas: self.tools.show_formulas };
+        // Conditional formats may compare with other sheets and
+        // PivotTables, which need the workbook to resolve.
+        cellar::domain::with_recalc_context(wb, || {
+            for (frozen_row, rows) in &row_groups {
+                for (frozen_col, cols) in &col_groups {
+                    let pane = painter.with_clip_rect(layout.pane(screen, *frozen_row, *frozen_col));
+                    for idx in rows.clone() {
+                        let row = layout.row_at(idx);
+                        for col in cols.clone() {
+                            let rect = cell_rect(idx, col);
+                            if rect.width() <= 0.0 {
+                                continue;
+                            }
+                            match sheet.cells.get(&(row, col)) {
+                                Some(cd) => {
+                                    let style = sheet.display_style(row, col);
+                                    let chart = if look.show_formulas { None } else { sparkline(wb, cd) };
+                                    draw_cell(&pane, rect, cd, &style, chart.is_some(), &look);
+                                    if let Some((values, columns)) = chart {
+                                        let color = style.fg_color.as_ref().map_or(REF_COLORS[0], rgb);
+                                        draw_sparkline(&pane, rect, &values, columns, color);
+                                    }
+                                }
+                                // Table banding covers cells that hold nothing.
+                                None if has_tables => {
+                                    if let Some(fill) = sheet.table_style_for(row, col).and_then(|s| s.bg_color) {
+                                        pane.rect_filled(rect.shrink(0.5), 0.0, rgb(&fill));
+                                    }
+                                }
+                                None => {}
+                            }
+                            if found.contains(&(row, col)) {
+                                pane.rect_filled(rect.shrink(0.5), 0.0, Color32::from_rgb(255, 210, 0).gamma_multiply(0.35));
+                            }
+                        }
+                    }
+                }
             }
-            let x = origin.x + ROW_HEADER_W + layout.col_x[col];
-            painter.vline(x, body_top..=screen.max.y, Stroke::new(1.0, grid_line));
+        });
+
+        // Grid lines. Frozen edges sit at fixed positions; scrolled ones
+        // are clipped to their side of the freeze line.
+        let line = Stroke::new(1.0, grid_line);
+        let scrolled_cols = painter.with_clip_rect(Rect::from_min_max(pos2(fx, screen.min.y), screen.max));
+        for col in 0..=fc {
+            painter.vline(body_left + layout.col_x[col], body_top..=screen.max.y, line);
+        }
+        for col in c0..=(c1 + 1).min(layout.cols()) {
+            scrolled_cols.vline(origin.x + ROW_HEADER_W + layout.col_x[col], body_top..=screen.max.y, line);
+        }
+        let scrolled_rows = painter.with_clip_rect(Rect::from_min_max(pos2(screen.min.x, fy), screen.max));
+        for idx in 0..=fr {
+            painter.hline(body_left..=screen.max.x, body_top + layout.row_y(idx), line);
         }
         for idx in r0..=r1 {
-            let y = origin.y + HEADER_H + layout.row_y(idx);
-            painter.hline(body_left..=screen.max.x, y, Stroke::new(1.0, grid_line));
+            scrolled_rows.hline(body_left..=screen.max.x, origin.y + HEADER_H + layout.row_y(idx), line);
         }
 
-        // Selection, cursor, and formula-reference highlight.
+        // Selection, cursor, and formula-reference highlight, each drawn
+        // pane by pane so nothing shows through a frozen pane.
         let body = painter.with_clip_rect(Rect::from_min_max(pos2(body_left, body_top), screen.max));
-        let range_rect = |a: (usize, usize), b: (usize, usize)| Self::range_rect(layout, cell_rect, (a, b));
-        if let Some((a, b)) = self.app.get_selection_range()
-            && let Some(rect) = range_rect(a, b)
-        {
-            body.rect_filled(rect, 0.0, v.selection.bg_fill.gamma_multiply(0.35));
-            body.rect_stroke(rect, 0.0, Stroke::new(1.0, accent), StrokeKind::Inside);
+        let outline = |range: CellRange, fill: Color32, stroke: Stroke| {
+            for (pane, rect) in layout.range_parts(origin, screen, range) {
+                let p = painter.with_clip_rect(pane);
+                p.rect_filled(rect, 0.0, fill);
+                p.rect_stroke(rect, 0.0, stroke, StrokeKind::Inside);
+            }
+        };
+        if let Some(range) = self.app.get_selection_range() {
+            outline(range, v.selection.bg_fill.gamma_multiply(0.35), Stroke::new(1.0, accent));
         }
-        if let Some(Drag::RefPick { anchor, current }) = self.grid.drag
-            && let Some(rect) = range_rect(anchor, current)
-        {
+        if let Some(Drag::RefPick { anchor, current }) = self.grid.drag {
             let blue = Color32::from_rgb(40, 110, 230);
-            body.rect_filled(rect, 0.0, blue.gamma_multiply(0.12));
-            body.rect_stroke(rect, 0.0, Stroke::new(1.5, blue), StrokeKind::Inside);
+            outline((anchor, current), blue.gamma_multiply(0.12), Stroke::new(1.5, blue));
         }
         for (range, color) in self.formula_highlights(layout) {
-            if let Some(rect) = range_rect(range.0, range.1) {
-                body.rect_filled(rect, 0.0, color.gamma_multiply(0.10));
-                body.rect_stroke(rect, 0.0, Stroke::new(1.5, color), StrokeKind::Inside);
-            }
+            outline(range, color.gamma_multiply(0.10), Stroke::new(1.5, color));
         }
-        if let Some(idx) = layout.index_of(self.app.selected_row)
-            && self.app.selected_col < layout.cols()
-        {
-            let rect = cell_rect(idx, self.app.selected_col);
-            body.rect_stroke(rect, 0.0, Stroke::new(2.0, accent), StrokeKind::Inside);
-        }
+        let cursor = (self.app.selected_row, self.app.selected_col);
+        outline((cursor, cursor), Color32::TRANSPARENT, Stroke::new(2.0, accent));
+        self.paint_trace(layout, &body, &outline, cell_rect);
         if let Some(h) = self.handle_rect(layout, cell_rect) {
             body.rect_filled(h.expand(1.0), 0.0, bg);
             body.rect_filled(h, 0.0, accent);
@@ -555,50 +740,172 @@ impl GuiApp {
         let header_font = FontId::proportional(12.0);
         let col_header = Rect::from_min_max(screen.min, pos2(screen.max.x, screen.min.y + HEADER_H));
         painter.rect_filled(col_header, 0.0, header_bg);
-        let hp = painter.with_clip_rect(Rect::from_min_max(pos2(body_left, screen.min.y), screen.max));
-        for col in c0..=c1 {
-            let x0 = origin.x + ROW_HEADER_W + layout.col_x[col];
-            let x1 = origin.x + ROW_HEADER_W + layout.col_x[col + 1];
-            if x1 <= x0 {
-                continue;
+        for (frozen, cols) in &col_groups {
+            let (left, right, base) =
+                if *frozen { (body_left, fx, screen.min.x) } else { (fx, screen.max.x, origin.x) };
+            let hp = painter.with_clip_rect(Rect::from_min_max(pos2(left, screen.min.y), pos2(right, screen.max.y)));
+            for col in cols.clone() {
+                let x0 = base + ROW_HEADER_W + layout.col_x[col];
+                let x1 = base + ROW_HEADER_W + layout.col_x[col + 1];
+                if x1 <= x0 {
+                    continue;
+                }
+                let r = Rect::from_min_max(pos2(x0, screen.min.y), pos2(x1, screen.min.y + HEADER_H));
+                if (sc0..=sc1).contains(&col) {
+                    hp.rect_filled(r, 0.0, header_hl);
+                }
+                hp.vline(x1, r.y_range(), line);
+                hp.text(r.center(), Align2::CENTER_CENTER, Spreadsheet::column_label(col), header_font.clone(), text);
+                if self.app.filter_column == Some(col) && self.app.filter_value.is_some() {
+                    // A funnel marks the filtered column.
+                    let c = pos2(x1 - 9.0, r.center().y);
+                    let funnel = vec![c + vec2(-4.5, -4.0), c + vec2(4.5, -4.0), c + vec2(0.0, 1.0)];
+                    hp.add(egui::Shape::convex_polygon(funnel, accent, Stroke::NONE));
+                    hp.line_segment([c, c + vec2(0.0, 5.0)], Stroke::new(1.6, accent));
+                }
             }
-            let r = Rect::from_min_max(pos2(x0, screen.min.y), pos2(x1, screen.min.y + HEADER_H));
-            if (sc0..=sc1).contains(&col) {
-                hp.rect_filled(r, 0.0, header_hl);
-            }
-            hp.vline(x1, r.y_range(), Stroke::new(1.0, grid_line));
-            hp.text(r.center(), Align2::CENTER_CENTER, Spreadsheet::column_label(col), header_font.clone(), text);
         }
         let row_header = Rect::from_min_max(screen.min, pos2(screen.min.x + ROW_HEADER_W, screen.max.y));
         painter.rect_filled(row_header, 0.0, header_bg);
-        let rp = painter.with_clip_rect(Rect::from_min_max(pos2(screen.min.x, body_top), screen.max));
-        for idx in r0..r1 {
-            let row = layout.row_at(idx);
-            let y0 = origin.y + HEADER_H + layout.row_y(idx);
-            let r = Rect::from_min_size(pos2(screen.min.x, y0), vec2(ROW_HEADER_W, layout.row_h(idx)));
-            if (sr0..=sr1).contains(&row) {
-                rp.rect_filled(r, 0.0, header_hl);
+        for (frozen, rows) in &row_groups {
+            let (top, bottom, base) =
+                if *frozen { (body_top, fy, screen.min.y) } else { (fy, screen.max.y, origin.y) };
+            let rp = painter.with_clip_rect(Rect::from_min_max(pos2(screen.min.x, top), pos2(screen.max.x, bottom)));
+            for idx in rows.clone() {
+                let row = layout.row_at(idx);
+                let y0 = base + HEADER_H + layout.row_y(idx);
+                let r = Rect::from_min_size(pos2(screen.min.x, y0), vec2(ROW_HEADER_W, layout.row_h(idx)));
+                if (sr0..=sr1).contains(&row) {
+                    rp.rect_filled(r, 0.0, header_hl);
+                }
+                rp.hline(r.x_range(), r.max.y, line);
+                rp.text(r.center(), Align2::CENTER_CENTER, (row + 1).to_string(), header_font.clone(), text);
             }
-            rp.hline(r.x_range(), r.max.y, Stroke::new(1.0, grid_line));
-            rp.text(r.center(), Align2::CENTER_CENTER, (row + 1).to_string(), header_font.clone(), text);
         }
         let corner = Rect::from_min_size(screen.min, vec2(ROW_HEADER_W, HEADER_H));
         painter.rect_filled(corner, 0.0, header_bg);
-        painter.hline(screen.x_range(), screen.min.y + HEADER_H, Stroke::new(1.0, grid_line));
-        painter.vline(screen.min.x + ROW_HEADER_W, screen.y_range(), Stroke::new(1.0, grid_line));
+        painter.hline(screen.x_range(), screen.min.y + HEADER_H, line);
+        painter.vline(screen.min.x + ROW_HEADER_W, screen.y_range(), line);
+
+        // Freeze lines, across the headers too.
+        let freeze = Stroke::new(1.0, if dark { Color32::from_gray(130) } else { Color32::from_gray(120) });
+        if fc > 0 {
+            painter.vline(fx, screen.y_range(), freeze);
+        }
+        if fr > 0 {
+            painter.hline(screen.x_range(), fy, freeze);
+        }
+    }
+
+    /// Formulas → Trace Precedents / Dependents: arrows into and out of
+    /// the traced cell, like Excel's blue tracer arrows.
+    fn paint_trace(
+        &self,
+        layout: &Layout,
+        body: &Painter,
+        outline: &dyn Fn(CellRange, Color32, Stroke),
+        cell_rect: &dyn Fn(usize, usize) -> Rect,
+    ) {
+        let Some(trace) = &self.tools.trace else { return };
+        if trace.sheet != self.app.workbook.active_sheet {
+            return;
+        }
+        let blue = Color32::from_rgb(52, 120, 246);
+        let stroke = Stroke::new(1.5, blue);
+        let center = |(r, c): (usize, usize)| {
+            let idx = layout.index_of(r)?;
+            (c < layout.cols()).then(|| cell_rect(idx, c).center())
+        };
+        let arrow = |from: (usize, usize), to: (usize, usize)| {
+            if let (Some(a), Some(b)) = (center(from), center(to))
+                && a != b
+            {
+                body.circle_filled(a, 3.0, blue);
+                body.arrow(a, b - a, stroke);
+            }
+        };
+        for range in &trace.precedents {
+            if range.0 != range.1 {
+                outline(*range, Color32::TRANSPARENT, Stroke::new(1.0, blue));
+            }
+            arrow(range.0, trace.cell);
+        }
+        for dependent in &trace.dependents {
+            arrow(trace.cell, *dependent);
+        }
+    }
+
+    /// Hovering a cell shows its comment, and where its link goes.
+    fn cell_hover(&mut self, ui: &Ui, layout: &Layout, origin: Pos2, screen: Rect, response: &egui::Response) {
+        if self.grid.drag.is_some() || self.edit.is_some() || !response.hovered() {
+            return;
+        }
+        let Some(pos) = ui.ctx().pointer_hover_pos() else { return };
+        if self.grid.overlays.iter().any(|r| r.contains(pos)) {
+            return;
+        }
+        let Hit::Cell(row, col) = self.hit_test(layout, origin, screen, pos) else { return };
+        if self.tools.painter.is_some() {
+            ui.ctx().set_cursor_icon(CursorIcon::Copy);
+        }
+        let Some(cd) = self.app.workbook.current_sheet().cells.get(&(row, col)) else { return };
+        let mut lines: Vec<String> = cd.comment.iter().cloned().collect();
+        if let Some(url) = self.hyperlink_url(cd) {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            let key = if ui.ctx().os() == egui::os::OperatingSystem::Mac { "Cmd" } else { "Ctrl" };
+            lines.push(format!("{}\n{}+click to open", url, key));
+        }
+        if lines.is_empty() {
+            return;
+        }
+        egui::Area::new(egui::Id::new("cell_hover"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(pos + vec2(14.0, 16.0))
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(320.0);
+                    for line in lines {
+                        ui.label(line);
+                    }
+                });
+            });
+    }
+
+    /// The address a `=HYPERLINK(address, …)` cell opens.
+    pub fn hyperlink_url(&self, cd: &CellData) -> Option<String> {
+        let formula = cd.formula.as_deref().filter(|f| is_hyperlink(f))?;
+        // The first argument: up to the first comma outside quotes and brackets.
+        let args = &formula["=HYPERLINK(".len()..];
+        let (mut depth, mut in_string, mut end) = (0usize, false, args.len());
+        for (i, ch) in args.char_indices() {
+            match ch {
+                '"' => in_string = !in_string,
+                '(' if !in_string => depth += 1,
+                ')' | ',' if !in_string && depth == 0 => {
+                    end = i;
+                    break;
+                }
+                ')' if !in_string => depth -= 1,
+                _ => {}
+            }
+        }
+        let wb = &self.app.workbook;
+        let evaluator = cellar::domain::FormulaEvaluator::for_workbook(wb, wb.current_sheet(), &wb.named_ranges);
+        let url = evaluator.evaluate_formula(&format!("={}", &args[..end]));
+        (!url.is_empty() && !url.starts_with('#')).then_some(url)
     }
 
     fn hit_test(&self, layout: &Layout, origin: Pos2, screen: Rect, p: Pos2) -> Hit {
         let in_header_row = p.y < screen.min.y + HEADER_H;
         let in_header_col = p.x < screen.min.x + ROW_HEADER_W;
         if !in_header_row && !in_header_col {
-            let cell_rect = |row_idx: usize, col: usize| layout.cell_rect(origin, row_idx, col);
+            let cell_rect = |row_idx: usize, col: usize| layout.cell_rect(origin, screen, row_idx, col);
             if self.handle_rect(layout, &cell_rect).is_some_and(|h| h.expand(3.0).contains(p)) {
                 return Hit::FillHandle;
             }
         }
-        let bx = p.x - origin.x - ROW_HEADER_W;
-        let by = p.y - origin.y - HEADER_H;
+        let (bx, by) = layout.body_pos(origin, screen, p);
         let row_idx = layout.row_idx_at(by);
         match (in_header_row, in_header_col) {
             (true, true) => Hit::Corner,
@@ -670,7 +977,8 @@ impl GuiApp {
         }
 
         if pressed && hovering {
-            self.on_press(hit, shift, layout);
+            let open_link = ui.input(|i| i.modifiers.command) && self.edit.is_none();
+            self.on_press(hit, shift, open_link, layout);
         } else if down && let Some(drag) = self.grid.drag {
             self.on_drag(drag, hit, pos, layout);
             // Auto-scroll while dragging past the edge.
@@ -717,7 +1025,7 @@ impl GuiApp {
         }
     }
 
-    fn on_press(&mut self, hit: Hit, shift: bool, layout: &Layout) {
+    fn on_press(&mut self, hit: Hit, shift: bool, open_link: bool, layout: &Layout) {
         // While typing a formula, clicking a cell inserts its reference.
         let active = self.app.workbook.active_sheet;
         let picking_ref = self.edit.as_ref().is_some_and(|e| {
@@ -726,6 +1034,22 @@ impl GuiApp {
         });
         if picking_ref && let Hit::Cell(r, c) = hit {
             self.grid.drag = Some(Drag::RefPick { anchor: (r, c), current: (r, c) });
+            return;
+        }
+        // A dialog asking for a reference takes the cells clicked or
+        // dragged over, like Excel's range boxes.
+        if let Hit::Cell(r, c) = hit
+            && self.edit.is_none()
+            && self.tools.picking().is_some()
+        {
+            self.grid.drag = Some(Drag::RefPick { anchor: (r, c), current: (r, c) });
+            return;
+        }
+        if open_link
+            && let Hit::Cell(r, c) = hit
+            && let Some(url) = self.app.workbook.current_sheet().cells.get(&(r, c)).and_then(|cd| self.hyperlink_url(cd))
+        {
+            self.open_link(&url);
             return;
         }
         self.commit_edit(EditMove::Stay);
@@ -924,6 +1248,14 @@ impl GuiApp {
     fn on_release(&mut self, drag: Drag, toggle_mode: bool) {
         match drag {
             Drag::Resize { .. } | Drag::RowResize { .. } => self.app.dirty = true,
+            // Format Painter: the cells just clicked or dragged over take
+            // the picked-up formatting.
+            Drag::Cells { .. } | Drag::Rows { .. } | Drag::Cols { .. } => {
+                if let Some(block) = self.tools.painter.take() {
+                    let target = self.selection_or_cursor();
+                    self.app.apply_formats(&block, target);
+                }
+            }
             Drag::Fill { source, end } => match fill_target(source, end) {
                 Some(FillTarget::Fill(t)) => {
                     let mode = self.drag_fill_mode(source, toggle_mode);
@@ -945,11 +1277,14 @@ impl GuiApp {
                     (anchor.0.min(current.0), anchor.1.min(current.1)),
                     (anchor.0.max(current.0), anchor.1.max(current.1)),
                 );
+                if self.edit.is_none() {
+                    self.pick_for_dialog((a, b));
+                    return;
+                }
                 let reference = if a == b { label(a) } else { format!("{}:{}", label(a), label(b)) };
                 let prefix = self.reference_sheet_prefix().unwrap_or_default();
                 self.insert_reference(&format!("{}{}", prefix, reference));
             }
-            _ => {}
         }
     }
 
@@ -991,7 +1326,8 @@ impl GuiApp {
             return;
         }
         let rect = cell_rect(idx, edit.col);
-        if !screen.intersects(rect) {
+        // Not while scrolled out of view or under a frozen pane.
+        if !screen.intersects(rect) || !layout.pane_of(screen, idx, edit.col).intersects(rect) {
             return;
         }
         // Grow the editor to fit the text, like Excel does.
@@ -1018,14 +1354,16 @@ impl GuiApp {
         if edit.focus_pending {
             edit.focus_pending = false;
             resp.request_focus();
-            move_caret_to_end(ui.ctx(), id, edit.text.chars().count());
+            let caret = edit.caret.take().unwrap_or(edit.text.chars().count());
+            move_caret_to_end(ui.ctx(), id, caret);
         }
+        self.formula_assist(ui.ctx(), id, rect);
     }
 
     fn grid_context_menu(&mut self, ui: &mut Ui) {
         use crate::shortcuts::Action;
         let ctx = ui.ctx().clone();
-        for a in [Action::Cut, Action::Copy, Action::Paste, Action::ClearContents, Action::CopyMarkdown] {
+        for a in [Action::Cut, Action::Copy, Action::Paste, Action::PasteSpecial, Action::ClearContents, Action::CopyMarkdown] {
             self.menu_item(ui, &ctx, a);
         }
         ui.separator();
@@ -1034,54 +1372,63 @@ impl GuiApp {
         }
         self.row_col_buttons(ui, &ctx);
         ui.separator();
+        for a in [Action::SortAscending, Action::SortDescending, Action::FilterBySelection, Action::ClearFilter] {
+            self.menu_item(ui, &ctx, a);
+        }
+        ui.separator();
+        for a in [Action::EditComment, Action::InsertHyperlink, Action::FormatPainter] {
+            self.menu_item(ui, &ctx, a);
+        }
+        ui.separator();
         for a in [Action::InsertChart, Action::PivotTable] {
             self.menu_item(ui, &ctx, a);
         }
     }
 }
 
-fn draw_cell(
-    painter: &Painter,
-    rect: Rect,
-    cd: &CellData,
-    conditional: Option<CellStyle>,
-    font: &FontId,
-    default_text: Color32,
+/// How cells are drawn this frame.
+struct CellLook<'a> {
+    font: &'a FontId,
+    text: Color32,
     dark: bool,
-) {
-    let mut style = cd.format.as_ref().map(|f| f.style.clone()).unwrap_or_default();
-    if let Some(cf) = conditional {
-        style.bold |= cf.bold;
-        style.underline |= cf.underline;
-        if cf.fg_color.is_some() {
-            style.fg_color = cf.fg_color;
-        }
-        if cf.bg_color.is_some() {
-            style.bg_color = cf.bg_color;
-        }
-    }
+    /// View → Show Formulas: formula text instead of results.
+    show_formulas: bool,
+}
+
+fn draw_cell(painter: &Painter, rect: Rect, cd: &CellData, style: &CellStyle, hide_text: bool, look: &CellLook) {
     if let Some(bg) = &style.bg_color {
         painter.rect_filled(rect.shrink(0.5), 0.0, rgb(bg));
     }
-    let shown = match &cd.format {
-        Some(fmt) => format_cell_value(&cd.value, fmt),
-        None => cd.value.clone(),
+    if cd.comment.is_some() {
+        // Excel's red corner marks a cell with a comment.
+        let c = rect.right_top() + vec2(-0.5, 0.5);
+        let corner = vec![c + vec2(-6.0, 0.0), c, c + vec2(0.0, 6.0)];
+        painter.add(egui::Shape::convex_polygon(corner, Color32::from_rgb(210, 50, 50), Stroke::NONE));
+    }
+    let formula = cd.formula.as_deref().filter(|_| look.show_formulas);
+    let shown = match (formula, &cd.format) {
+        (Some(f), _) => f.to_string(),
+        (None, Some(fmt)) => format_cell_value(&cd.value, fmt),
+        (None, None) => cd.value.clone(),
     };
-    if shown.is_empty() {
+    if shown.is_empty() || hide_text {
         return;
     }
-    let is_error = is_error_value(&cd.value);
-    let numeric = cd.value.trim().parse::<f64>().is_ok();
+    let is_error = formula.is_none() && is_error_value(&cd.value);
+    let numeric = formula.is_none() && cd.value.trim().parse::<f64>().is_ok();
+    let link = formula.is_none() && cd.formula.as_deref().is_some_and(is_hyperlink);
     let color = match (&style.fg_color, &style.bg_color) {
         _ if is_error => Color32::from_rgb(210, 50, 50),
         // Black text would vanish on the dark theme's background.
-        (Some(TerminalColor::Black), None) if dark => default_text,
+        (Some(TerminalColor::Black), None) if look.dark => look.text,
         (Some(fg), _) => rgb(fg),
+        (None, None) if link && look.dark => Color32::from_rgb(110, 170, 255),
+        (None, _) if link => Color32::from_rgb(20, 90, 200),
         // Pale fills are designed for dark text.
         (None, Some(_)) => Color32::BLACK,
-        (None, None) => default_text,
+        (None, None) => look.text,
     };
-    let galley = painter.layout_no_wrap(shown, font.clone(), color);
+    let galley = painter.layout_no_wrap(shown, look.font.clone(), color);
     let size = galley.size();
     let x = if numeric || is_error {
         rect.max.x - 4.0 - size.x
@@ -1095,11 +1442,71 @@ fn draw_cell(
         // egui's default font has no bold face; overdraw for weight.
         clip.galley(pos + vec2(0.6, 0.0), galley.clone(), color);
     }
-    if style.underline {
+    if style.underline || link {
         let y = pos.y + size.y - 1.0;
         clip.hline(pos.x..=pos.x + size.x, y, Stroke::new(1.0, color));
     }
     clip.galley(pos, galley, color);
+}
+
+fn is_hyperlink(formula: &str) -> bool {
+    formula.get(..11).is_some_and(|start| start.eq_ignore_ascii_case("=HYPERLINK("))
+}
+
+/// The numbers a `=SPARKLINE(range, …)` cell charts, and whether as
+/// columns (`"column"` or `"bar"`) instead of a line. The chart is drawn
+/// from the range itself; the cell's value is only a text rendering.
+fn sparkline(wb: &Workbook, cd: &CellData) -> Option<(Vec<f64>, bool)> {
+    let formula = cd.formula.as_deref()?;
+    if !formula.get(..11).is_some_and(|start| start.eq_ignore_ascii_case("=SPARKLINE(")) {
+        return None;
+    }
+    let reference = formula_references(formula).into_iter().next()?;
+    let sheet = match &reference.sheet {
+        Some(name) => &wb.sheets[wb.sheet_names.iter().position(|n| n.eq_ignore_ascii_case(name))?],
+        None => wb.current_sheet(),
+    };
+    let ((r0, c0), (r1, c1)) = reference.range;
+    let (last_row, last_col) = sheet.last_cell();
+    let values: Vec<f64> = (r0..=r1.min(last_row))
+        .flat_map(|r| (c0..=c1.min(last_col)).map(move |c| (r, c)))
+        .take(2000)
+        .filter_map(|pos| sheet.cells.get(&pos)?.value.trim().parse().ok())
+        .collect();
+    let lower = formula.to_lowercase();
+    (!values.is_empty()).then(|| (values, lower.contains("\"column\"") || lower.contains("\"bar\"")))
+}
+
+fn draw_sparkline(painter: &Painter, rect: Rect, values: &[f64], columns: bool, color: Color32) {
+    let area = rect.shrink2(vec2(4.0, 3.0));
+    if area.width() <= 2.0 || area.height() <= 2.0 {
+        return;
+    }
+    let (mut lo, mut hi) = values.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+    if columns {
+        // Columns grow from zero.
+        (lo, hi) = (lo.min(0.0), hi.max(0.0));
+    }
+    let span = if hi > lo { hi - lo } else { 1.0 };
+    let y = |v: f64| area.max.y - ((v - lo) / span) as f32 * area.height();
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+    if columns {
+        let step = area.width() / values.len() as f32;
+        for (i, v) in values.iter().enumerate() {
+            let x = area.min.x + i as f32 * step;
+            let bar = Rect::from_two_pos(pos2(x + step * 0.1, y(0.0)), pos2(x + step * 0.9, y(*v)));
+            let fill = if *v < 0.0 { Color32::from_rgb(210, 60, 60) } else { color };
+            painter.rect_filled(bar, 0.0, fill);
+        }
+    } else {
+        let step = area.width() / (values.len().max(2) - 1) as f32;
+        let points: Vec<Pos2> = values.iter().enumerate().map(|(i, v)| pos2(area.min.x + i as f32 * step, y(*v))).collect();
+        if let [only] = points[..] {
+            painter.circle_filled(only, 2.0, color);
+        } else {
+            painter.add(egui::Shape::line(points, Stroke::new(1.5, color)));
+        }
+    }
 }
 
 fn is_error_value(v: &str) -> bool {

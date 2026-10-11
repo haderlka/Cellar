@@ -78,6 +78,7 @@ impl GuiApp {
         self.pivot_dialogs(ctx);
         self.import_report_dialog(ctx);
         self.rename_dialog(ctx);
+        self.tool_dialogs(ctx);
         self.help_window(ctx);
         self.about_window(ctx);
     }
@@ -282,6 +283,7 @@ impl GuiApp {
             (format!("{}Enter", cmd), "Commit into every selected cell"),
             ("Esc".into(), "Cancel the edit"),
             ("While typing =…".into(), "Click or drag cells to insert references"),
+            ("Tab, while typing =…".into(), "Insert the highlighted function or name"),
             ("Fill handle".into(), "Drag the square at the selection's corner; double-click fills down"),
         ];
         let moving: Vec<(String, &str)> = vec![
@@ -289,6 +291,9 @@ impl GuiApp {
             (format!("{}Arrow", cmd), "Jump to the edge of the data (Shift extends)"),
             ("Home".into(), "Start of the row"),
             (format!("{}Home / {}End", cmd, cmd), "First cell / last used cell"),
+            (format!("{}click a link", cmd), "Open a =HYPERLINK(…) cell's address"),
+            ("Name Box".into(), "Type a cell, range or name to go there; a new name names the selection"),
+            ("Sheet tabs".into(), "Drag to reorder; right-click to rename, duplicate or delete"),
         ];
         egui::Window::new("Keyboard Shortcuts & Formulas")
             .open(&mut self.dialogs.help)
@@ -319,7 +324,9 @@ impl GuiApp {
                     ui.separator();
                     ui.label(
                         "Formulas use Excel syntax: =SUM(A1:A10), =IF(B2>0, \"yes\", \"no\"), \
-                         =VLOOKUP(…), =XLOOKUP(…), =Sheet2!A1, dynamic arrays like =SORT(A2:A9).",
+                         =VLOOKUP(…), =XLOOKUP(…), =Sheet2!A1, dynamic arrays like =SORT(A2:A9), \
+                         table columns like =SUM(Sales[Price]), links with =HYPERLINK(\"https://…\", \"text\") \
+                         and in-cell charts with =SPARKLINE(B2:M2) or =SPARKLINE(B2:M2, \"column\").",
                     );
                     ui.add_space(4.0);
                     ui.label(

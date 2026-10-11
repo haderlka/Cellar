@@ -489,3 +489,57 @@ fn sanitize_clamps_row_heights() {
     assert_eq!(sheet.row_heights.len(), 1);
     assert_eq!(sheet.get_row_height(0), Spreadsheet::MAX_ROW_HEIGHT);
 }
+
+#[test]
+fn predicate_placeholder_is_a_lone_underscore() {
+    let mut sheet = Spreadsheet::default();
+    sheet.named_ranges.insert("MAX_QTY".to_string(), "10".to_string());
+    assert!(sheet.predicate_holds("_ <= MAX_QTY", "7"));
+    assert!(!sheet.predicate_holds("_ <= MAX_QTY", "11"));
+    assert!(sheet.predicate_holds("_ = \"a_b\"", "a_b"), "an underscore in text is text");
+    assert!(sheet.predicate_holds("LEN(_) = 0", ""));
+    // An error is not a yes: text in a numeric rule fails it.
+    assert!(!sheet.predicate_holds("AND(_ = INT(_), _ > 0)", "abc"));
+    assert!(!sheet.predicate_holds("NOSUCHFUNCTION(_)", "1"));
+}
+
+#[test]
+fn predicate_row_is_the_cells_own_row() {
+    let mut sheet = Spreadsheet::default();
+    for (row, target) in ["10", "20"].iter().enumerate() {
+        sheet.set_cell(row, 2, CellData { value: target.to_string(), ..CellData::default() });
+    }
+    let rule = "_ < INDIRECT(\"C\" & row())";
+    assert!(sheet.predicate_holds_at(rule, "15", Some(1)), "15 < C2");
+    assert!(!sheet.predicate_holds_at(rule, "15", Some(0)), "15 < C1 is false");
+    assert!(sheet.predicate_holds_at("_ = \"ROW()\"", "ROW()", Some(4)), "text is left alone");
+    assert!(!sheet.predicate_holds("ROW() = 1", "x"), "without a row there is no ROW()");
+}
+
+#[test]
+fn current_region_stops_at_empty_rows_and_columns() {
+    let mut sheet = Spreadsheet::default();
+    for (r, c) in [(1, 1), (1, 2), (2, 1), (3, 3), (6, 1)] {
+        sheet.set_cell(r, c, CellData { value: "x".into(), ..CellData::default() });
+    }
+    assert_eq!(sheet.current_region(2, 1), ((1, 1), (3, 3)), "diagonal neighbours join the block");
+    assert_eq!(sheet.current_region(6, 1), ((6, 1), (6, 1)));
+    assert_eq!(sheet.current_region(9, 9), ((9, 9), (9, 9)));
+}
+
+#[test]
+fn tables_style_their_header_and_every_second_row() {
+    let mut sheet = Spreadsheet::default();
+    sheet.tables.push(Table { name: "T".into(), top_row: 2, left_col: 1, bottom_row: 5, right_col: 2, headers: vec!["A".into(), "B".into()] });
+    assert!(sheet.table_style_for(2, 1).unwrap().bold);
+    assert_eq!(sheet.table_style_for(3, 1), None);
+    assert_eq!(sheet.table_style_for(4, 2).unwrap().bg_color, Some(TerminalColor::LightBlue));
+    assert_eq!(sheet.table_style_for(4, 3), None);
+    // A cell's own fill wins over the band.
+    let own = CellFormat { style: CellStyle { bg_color: Some(TerminalColor::Yellow), ..CellStyle::default() }, ..CellFormat::default() };
+    sheet.set_cell(4, 2, CellData { value: "v".into(), format: Some(own), ..CellData::default() });
+    assert_eq!(sheet.display_style(4, 2).bg_color, Some(TerminalColor::Yellow));
+
+    sheet.delete_row(2);
+    assert!(sheet.tables.is_empty(), "deleting the header row removes the table");
+}
