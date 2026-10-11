@@ -21,6 +21,8 @@
 
 ![Cellar with a workbook, a PivotTable and a PivotChart in the sidebar](docs/screenshot.png)
 
+**[User guide](https://haderlka.github.io/Cellar/)**: every feature and how to use it.
+
 ## Why Cellar?
 
 Spreadsheets end up holding important data, but `.xlsx` files are zipped
@@ -91,9 +93,10 @@ workbook in a `.cellar` file:
 - **Tables** (*Format → Format as Table*, Ctrl+T): a header row with banded
   rows, columns readable in formulas as `Sales[Price]`, growing as you type
   below.
-- **Conditional formatting**: bold, underline and colours for the cells of a
-  column that are greater than, between, containing…, above average,
-  duplicates, the top 10, or matching your own formula. Compare with a
+- **Conditional formatting**: bold, underline and colours for cells
+  (`C1`, `C1:D5`, a whole column `B:B`) that are greater than, between,
+  containing…, above average, duplicates, the top 10, or matching your own
+  formula. Compare with a
   number, another cell (`C3`, fixed or in each row), a cell on another
   sheet or a PivotTable value (`GETPIVOTDATA`).
 - **Sort** by one or several columns, keeping the header row; **Filter** a
@@ -308,7 +311,7 @@ hidden rows and columns, filter, validation rules), `pivots` and `charts`:
   {"bottom_row": 6, "headers": ["Region", "Month", "Revenue"], "left_col": 0, "name": "Sales", "right_col": 2, "top_row": 0}
 ],
 "conditional_formats": [
-  {"column": 2, "predicate": "_ > 1000", "style": {"bg_color": "LightGreen"}}
+  {"predicate": "_ > 1000", "range": "C2:C50", "style": {"bg_color": "LightGreen"}}
 ],
 ```
 

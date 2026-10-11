@@ -174,12 +174,119 @@ pub struct ChartSpec {
 /// `LEN(_) = 0`). Only the style is applied — number format is untouched.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConditionalFormat {
-    /// Column index this rule applies to.
-    pub column: usize,
+    /// The cells the rule applies to, written as in a formula: a cell
+    /// (`C1`), a range (`C1:D5`), whole columns (`C:C`, `B:D`), or
+    /// several of these separated by commas. See [`CellArea`].
+    pub range: String,
     /// Predicate formula, sans leading `=`. Use `_` to refer to the cell value.
     pub predicate: String,
     /// Style applied when predicate is truthy.
     pub style: CellStyle,
+}
+
+impl ConditionalFormat {
+    /// A rule for the whole of column `col`.
+    pub fn for_column(col: usize, predicate: &str, style: CellStyle) -> Self {
+        let label = Spreadsheet::column_label(col);
+        Self { range: format!("{}:{}", label, label), predicate: predicate.to_string(), style }
+    }
+
+    pub fn covers(&self, row: usize, col: usize) -> bool {
+        CellArea::parse_list(&self.range).is_some_and(|areas| areas.iter().any(|a| a.contains(row, col)))
+    }
+}
+
+/// A rectangle of cells a rule applies to. `last_row` is `None` for whole
+/// columns, which reach to the end of the sheet however long it grows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellArea {
+    pub first_row: usize,
+    pub last_row: Option<usize>,
+    pub first_col: usize,
+    pub last_col: usize,
+}
+
+impl CellArea {
+    /// Parse `C1`, `C1:D5`, `C` or `B:D` (case and `$` are ignored).
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().replace('$', "").to_uppercase();
+        let (a, b) = text.split_once(':').unwrap_or((&text, &text));
+        let column = |t: &str| {
+            (!t.is_empty() && t.chars().all(|c| c.is_ascii_alphabetic())).then(|| Spreadsheet::parse_column_label(t)).flatten()
+        };
+        if let (Some(c0), Some(c1)) = (column(a), column(b)) {
+            return Some(Self { first_row: 0, last_row: None, first_col: c0.min(c1), last_col: c0.max(c1) });
+        }
+        let ((r0, c0), (r1, c1)) = (Spreadsheet::parse_cell_reference(a)?, Spreadsheet::parse_cell_reference(b)?);
+        Some(Self { first_row: r0.min(r1), last_row: Some(r0.max(r1)), first_col: c0.min(c1), last_col: c0.max(c1) })
+    }
+
+    /// Parse a comma-separated list of areas; `None` if any part is not one.
+    pub fn parse_list(text: &str) -> Option<Vec<Self>> {
+        let areas: Option<Vec<Self>> = text.split(',').map(Self::parse).collect();
+        areas.filter(|a| !a.is_empty())
+    }
+
+    /// The canonical text of a list of areas: `B:B, C1:D5`.
+    pub fn list_label(areas: &[Self]) -> String {
+        areas.iter().map(Self::label).collect::<Vec<_>>().join(", ")
+    }
+
+    pub fn label(&self) -> String {
+        let col = Spreadsheet::column_label;
+        match self.last_row {
+            None => format!("{}:{}", col(self.first_col), col(self.last_col)),
+            Some(last) if last == self.first_row && self.first_col == self.last_col => {
+                format!("{}{}", col(self.first_col), self.first_row + 1)
+            }
+            Some(last) => format!("{}{}:{}{}", col(self.first_col), self.first_row + 1, col(self.last_col), last + 1),
+        }
+    }
+
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        (self.first_col..=self.last_col).contains(&col) && row >= self.first_row && self.last_row.is_none_or(|last| row <= last)
+    }
+
+    /// The area after a row or column was inserted or deleted; `None`
+    /// when all of it was deleted.
+    fn shifted(mut self, edit: StructuralEdit) -> Option<Self> {
+        // An inserted line pushes everything at or after it; one inside
+        // the span stretches it. A deleted line pulls and shrinks.
+        let insert = |first: &mut usize, last: &mut usize, at: usize| {
+            if at <= *first {
+                *first += 1;
+                *last += 1;
+            } else if at <= *last {
+                *last += 1;
+            }
+        };
+        let delete = |first: &mut usize, last: &mut usize, at: usize| -> bool {
+            if at < *first {
+                *first -= 1;
+                *last -= 1;
+            } else if at <= *last {
+                if *first == *last {
+                    return false;
+                }
+                *last -= 1;
+            }
+            true
+        };
+        let kept = match (edit, &mut self.last_row) {
+            (StructuralEdit::InsertRow(at), Some(last)) => {
+                insert(&mut self.first_row, last, at);
+                true
+            }
+            (StructuralEdit::DeleteRow(at), Some(last)) => delete(&mut self.first_row, last, at),
+            (StructuralEdit::InsertRow(_) | StructuralEdit::DeleteRow(_), None) => true,
+            (StructuralEdit::InsertCol(at), _) => {
+                insert(&mut self.first_col, &mut self.last_col, at);
+                true
+            }
+            (StructuralEdit::DeleteCol(at), _) => delete(&mut self.first_col, &mut self.last_col, at),
+        };
+        kept.then_some(self)
+    }
 }
 
 /// A row or column inserted or deleted at an index.
@@ -1080,7 +1187,7 @@ impl Spreadsheet {
 
     /// Tables and conditional-format rules follow rows and columns that
     /// are inserted or deleted, like cells do. A table whose header row or
-    /// last column is deleted is dropped, as is a rule on a deleted column.
+    /// last column is deleted is dropped, as is a rule whose cells are.
     fn shift_tables(&mut self, edit: StructuralEdit) {
         match edit {
             StructuralEdit::InsertRow(at) => {
@@ -1114,11 +1221,6 @@ impl Spreadsheet {
                         t.headers.insert((at - t.left_col).min(t.headers.len()), Self::column_label(at));
                     }
                 }
-                for rule in &mut self.conditional_formats {
-                    if rule.column >= at {
-                        rule.column += 1;
-                    }
-                }
             }
             StructuralEdit::DeleteCol(at) => {
                 self.tables.retain(|t| !(t.left_col == t.right_col && at == t.left_col));
@@ -1133,14 +1235,15 @@ impl Spreadsheet {
                         }
                     }
                 }
-                self.conditional_formats.retain(|rule| rule.column != at);
-                for rule in &mut self.conditional_formats {
-                    if rule.column > at {
-                        rule.column -= 1;
-                    }
-                }
             }
         }
+        // Rules move with their cells; one whose cells are all gone goes too.
+        self.conditional_formats.retain_mut(|rule| {
+            let Some(areas) = CellArea::parse_list(&rule.range) else { return true };
+            let areas: Vec<CellArea> = areas.into_iter().filter_map(|a| a.shifted(edit)).collect();
+            rule.range = CellArea::list_label(&areas);
+            !areas.is_empty()
+        });
         self.cf_cache.lock().unwrap().clear();
     }
 
@@ -1260,7 +1363,7 @@ impl Spreadsheet {
         let value = &cell.value;
         let mut result: Option<CellStyle> = None;
         for rule in &self.conditional_formats {
-            if rule.column != col {
+            if !rule.covers(row, col) {
                 continue;
             }
             let truthy = self.predicate_holds_at(&rule.predicate, value, Some(row));

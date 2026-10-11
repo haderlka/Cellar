@@ -278,14 +278,14 @@ mod tests {
         let mut sheet = Spreadsheet::default();
         // Pure predicate — not volatile.
         sheet.conditional_formats.push(ConditionalFormat {
-            column: 0,
+            range: "A:A".to_string(),
             predicate: "_ > 100".to_string(),
             style: CellStyle::default(),
         });
         assert!(!sheet.has_volatile_cf_predicate());
         // Add a NOW()-based rule — sheet is now volatile.
         sheet.conditional_formats.push(ConditionalFormat {
-            column: 1,
+            range: "B:B".to_string(),
             predicate: "NOW() > _".to_string(),
             style: CellStyle::default(),
         });
@@ -301,7 +301,7 @@ mod tests {
             spill_anchor: None,
         });
         wb.sheets[0].conditional_formats.push(ConditionalFormat {
-            column: 0,
+            range: "A:A".to_string(),
             predicate: "NOW() > _".to_string(),
             style: CellStyle { bold: true, ..CellStyle::default() },
         });
@@ -326,7 +326,7 @@ mod tests {
             spill_anchor: None,
         });
         wb.sheets[0].conditional_formats.push(ConditionalFormat {
-            column: 0,
+            range: "A:A".to_string(),
             predicate: "_ > 100".to_string(),
             style: CellStyle { bold: true, ..CellStyle::default() },
         });
@@ -353,7 +353,7 @@ mod tests {
         spill_anchor: None,
         });
         sheet.conditional_formats.push(ConditionalFormat {
-            column: 0,
+            range: "A:A".to_string(),
             predicate: "_ > 100".to_string(),
             style: CellStyle {
                 bold: true,

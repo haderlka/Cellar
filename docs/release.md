@@ -1,7 +1,12 @@
+---
+title: Releasing (for maintainers)
+nav_order: 20
+---
+
 # Releasing Cellar
 
 Releases are built by GitHub Actions
-([`.github/workflows/release.yml`](../.github/workflows/release.yml)) on
+([`.github/workflows/release.yml`](https://github.com/haderlka/Cellar/blob/main/.github/workflows/release.yml)) on
 GitHub's Windows, macOS and Linux machines. You don't need a Mac to build
 the macOS version. Pushing a tag like `v0.2.0` builds everything and creates
 a **draft** release with these files:

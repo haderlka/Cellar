@@ -736,11 +736,14 @@ impl App {
         self.record_action(UndoAction::ConditionalFormatsReplaced { sheet_idx, old, new: rules });
     }
 
-    /// Add one rule per column of the selection.
-    pub fn add_conditional_format(&mut self, columns: std::ops::RangeInclusive<usize>, predicate: &str, style: CellStyle) {
+    /// Add a rule for `range`: cells, ranges or whole columns as in a
+    /// formula (`C1`, `C1:D5`, `B:D`), separated by commas.
+    pub fn add_conditional_format(&mut self, range: &str, predicate: &str, style: CellStyle) -> Result<(), String> {
+        let areas = crate::domain::CellArea::parse_list(range).ok_or_else(|| format!("\"{}\" is not a range", range))?;
         let mut rules = self.workbook.current_sheet().conditional_formats.clone();
-        rules.extend(columns.map(|column| ConditionalFormat { column, predicate: predicate.to_string(), style: style.clone() }));
+        rules.push(ConditionalFormat { range: crate::domain::CellArea::list_label(&areas), predicate: predicate.to_string(), style });
         self.set_conditional_formats(rules);
+        Ok(())
     }
 
     // -------------------------------------------------- data validation
@@ -1081,11 +1084,11 @@ mod tests {
     fn deleting_a_column_drops_its_conditional_format() {
         let mut app = app_with(&[(0, 0, "1"), (0, 1, "2"), (0, 2, "3")]);
         let style = CellStyle { bold: true, ..CellStyle::default() };
-        app.add_conditional_format(1..=2, "_ > 1", style);
+        app.add_conditional_format("b:c", "_ > 1", style).unwrap();
         assert!(app.workbook.current_sheet().conditional_style_for(0, 1).is_some());
         app.delete_cols(1, 1);
         let rules = &app.workbook.current_sheet().conditional_formats;
-        assert_eq!(rules.iter().map(|r| r.column).collect::<Vec<_>>(), [1]);
+        assert_eq!(rules.iter().map(|r| r.range.as_str()).collect::<Vec<_>>(), ["B:B"]);
         app.undo();
         app.undo();
         assert!(app.workbook.current_sheet().conditional_formats.is_empty());
@@ -1097,8 +1100,9 @@ mod tests {
         app.workbook.add_sheet("Limits".to_string());
         app.workbook.sheets[1].set_cell(0, 1, CellData { value: "40".into(), ..CellData::default() });
         let bold = CellStyle { bold: true, ..CellStyle::default() };
-        app.add_conditional_format(0..=0, "_ < C3", bold.clone());
-        app.add_conditional_format(0..=0, "_ > Limits!B1", CellStyle { underline: true, ..CellStyle::default() });
+        app.add_conditional_format("A:A", "_ < C3", bold.clone()).unwrap();
+        app.add_conditional_format("A1:A2", "_ > Limits!B1", CellStyle { underline: true, ..CellStyle::default() }).unwrap();
+        assert!(app.add_conditional_format("A1:", "_ > 1", bold.clone()).is_err());
         let styles = |app: &App| {
             crate::domain::with_recalc_context(&app.workbook, || {
                 let sheet = app.workbook.current_sheet();
@@ -1116,6 +1120,20 @@ mod tests {
         app.set_cell_with_undo(0, 1, CellData { value: "99".into(), ..CellData::default() });
         app.workbook.active_sheet = 0;
         assert!(!styles(&app).1.underline, "the other sheet's edit is seen");
+    }
+
+    #[test]
+    fn rules_saved_with_a_column_number_still_load() {
+        let mut raw: serde_json::Value = serde_json::from_str(
+            r#"{"active_sheet": 0, "sheet_names": ["Sheet1"], "sheets": [{"cells": [], "conditional_formats": [
+                {"column": 2, "predicate": "_ > 1", "style": {"bold": true}},
+                {"range": "A1:B2", "predicate": "_ > 2", "style": {}}]}]}"#,
+        )
+        .unwrap();
+        crate::domain::migrate_workbook_json(&mut raw).unwrap();
+        let wb: Workbook = serde_json::from_value(raw).unwrap();
+        let ranges: Vec<&str> = wb.sheets[0].conditional_formats.iter().map(|r| r.range.as_str()).collect();
+        assert_eq!(ranges, ["C:C", "A1:B2"]);
     }
 
     #[test]

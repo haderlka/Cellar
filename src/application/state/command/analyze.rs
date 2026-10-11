@@ -109,11 +109,7 @@ impl App {
         let sheet_idx = self.workbook.active_sheet;
         let old = self.workbook.current_sheet().conditional_formats.clone();
         let mut new = old.clone();
-        new.push(crate::domain::ConditionalFormat {
-            column: col,
-            predicate: predicate.clone(),
-            style,
-        });
+        new.push(crate::domain::ConditionalFormat::for_column(col, &predicate, style));
         {
             let sheet = self.workbook.current_sheet_mut();
             sheet.conditional_formats = new.clone();

@@ -6,7 +6,7 @@
 
 use eframe::egui::{self, Color32, ComboBox, Context, Key, RichText, TextEdit};
 use cellar::application::{valid_name, CellRange, FormatBlock, PasteMode, SortKey};
-use cellar::domain::{CellStyle, ConditionalFormat, Spreadsheet, TerminalColor};
+use cellar::domain::{CellArea, CellStyle, ConditionalFormat, Spreadsheet, TerminalColor};
 
 use crate::app::{Edit, EditMove, GuiApp};
 use crate::grid::rgb;
@@ -227,10 +227,19 @@ impl CfKind {
         kinds
     }
 
-    /// The rule as a predicate for `column`. `same_row` compares with the
-    /// named cell's column in each cell's own row; `rows` is how far down
-    /// the rules that look at the whole column read.
-    fn predicate(self, a: &str, b: &str, same_row: bool, column: usize, rows: usize) -> Result<String, String> {
+    /// Whether the rule looks at all the cells it covers together (their
+    /// average, their duplicates…) rather than at each cell alone.
+    fn looks_at_all(self) -> bool {
+        matches!(
+            self,
+            CfKind::AboveAverage | CfKind::BelowAverage | CfKind::Duplicate | CfKind::Unique | CfKind::Top | CfKind::Bottom
+        )
+    }
+
+    /// The rule as a predicate. `same_row` compares with the named cell's
+    /// column in each cell's own row; `all` is the range that rules
+    /// looking at all their cells read (see [`Self::looks_at_all`]).
+    fn predicate(self, a: &str, b: &str, same_row: bool, all: &str) -> Result<String, String> {
         let side = |text: &str| -> Result<String, String> {
             let value = operand(text)?;
             if !same_row {
@@ -238,7 +247,7 @@ impl CfKind {
             }
             same_row_reference(&value).ok_or_else(|| format!("\"{}\" is not a cell; the same row needs one, e.g. C3", text.trim()))
         };
-        let whole_column = format!("{c}1:{c}{rows}", c = Spreadsheet::column_label(column));
+        let whole_column = all;
         let count = |text: &str| match text.trim().parse::<usize>() {
             Ok(n) if n > 0 => Ok(n),
             _ => Err("Enter how many values, e.g. 10".to_string()),
@@ -270,7 +279,10 @@ pub struct ConditionalDialog {
     /// Where the next clicked cell or PivotTable value goes.
     field: Field,
     rules: Vec<ConditionalFormat>,
-    columns: String,
+    /// The cells the rule being written applies to: `C1`, `C1:D5`, `B:D`.
+    applies: String,
+    /// Clicked cells go into `applies` rather than the compare fields.
+    picking_range: bool,
     kind: CfKind,
     a: String,
     b: String,
@@ -487,7 +499,11 @@ impl Tools {
         // Fields for one cell take the first cell of a dragged range.
         let cell = reference.split_once(':').map_or(reference, |(first, _)| first);
         if let Some(dlg) = &mut self.conditional {
+            let takes_cells = matches!(dlg.kind, CfKind::Value(_) | CfKind::Custom);
             match (dlg.kind, dlg.field) {
+                // The cells to format, when that field was clicked last
+                // or the condition has nothing to compare with.
+                _ if dlg.picking_range || !takes_cells => dlg.applies = reference.to_string(),
                 // A formula is being written: add to it.
                 (CfKind::Custom, _) => dlg.a.push_str(reference),
                 (CfKind::Value(Compare::Between), Field::B) => dlg.b = format!("={}", cell),
@@ -569,6 +585,29 @@ fn style_editor(ui: &mut egui::Ui, style: &mut CellStyle) {
     });
 }
 
+/// The rules a form entry makes: `(range, the range its predicate reads)`.
+/// A rule comparing each cell alone covers everything at once. One that
+/// looks at all its cells (average, duplicates, top N) is made per area,
+/// and per column for whole columns, which it reads down to row `rows`.
+fn rule_ranges(areas: &[CellArea], looks_at_all: bool, rows: usize) -> Vec<(String, String)> {
+    if !looks_at_all {
+        return vec![(CellArea::list_label(areas), String::new())];
+    }
+    let mut ranges = Vec::new();
+    for area in areas {
+        match area.last_row {
+            Some(_) => ranges.push((area.label(), area.label())),
+            None => {
+                for col in area.first_col..=area.last_col {
+                    let c = Spreadsheet::column_label(col);
+                    ranges.push((format!("{c}:{c}"), format!("{c}1:{c}{rows}")));
+                }
+            }
+        }
+    }
+    ranges
+}
+
 /// A sample of text in `style`.
 fn style_sample(ui: &mut egui::Ui, style: &CellStyle) {
     let mut text = RichText::new("AaBb 123");
@@ -587,13 +626,6 @@ fn style_sample(ui: &mut egui::Ui, style: &CellStyle) {
         text = text.background_color(rgb(bg));
     }
     ui.label(text);
-}
-
-fn parse_columns(text: &str) -> Option<std::ops::RangeInclusive<usize>> {
-    let text = text.trim().to_uppercase();
-    let (a, b) = text.split_once(':').unwrap_or((&text, &text));
-    let (a, b) = (Spreadsheet::parse_column_label(a.trim())?, Spreadsheet::parse_column_label(b.trim())?);
-    Some(a.min(b)..=a.max(b))
 }
 
 impl GuiApp {
@@ -941,17 +973,17 @@ impl GuiApp {
 
     pub fn open_conditional(&mut self) {
         self.commit_edit(EditMove::Stay);
-        let ((_, c0), (_, c1)) = self.selection_or_cursor();
-        let columns = if c0 == c1 {
-            Spreadsheet::column_label(c0)
-        } else {
-            format!("{}:{}", Spreadsheet::column_label(c0), Spreadsheet::column_label(c1))
-        };
+        // Like Excel, a new rule is for the selected cells; whole columns
+        // when whole columns are selected.
+        let ((r0, c0), (r1, c1)) = self.selection_or_cursor();
+        let whole_columns = r0 == 0 && r1 + 1 >= self.app.workbook.current_sheet().rows;
+        let area = CellArea { first_row: r0, last_row: (!whole_columns).then_some(r1), first_col: c0, last_col: c1 };
         self.tools.conditional = Some(ConditionalDialog {
             sheet: self.app.workbook.active_sheet,
             field: Field::A,
             rules: self.app.workbook.current_sheet().conditional_formats.clone(),
-            columns,
+            applies: area.label(),
+            picking_range: false,
             kind: CfKind::Value(Compare::Greater),
             a: String::new(),
             b: String::new(),
@@ -976,13 +1008,13 @@ impl GuiApp {
             let mut remove = None;
             egui::Grid::new("cf_rules").num_columns(4).striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
                 for (i, rule) in dlg.rules.iter().enumerate() {
-                    ui.label(format!("Column {}", Spreadsheet::column_label(rule.column)));
+                    ui.label(&rule.range);
                     ui.monospace(&rule.predicate);
                     style_sample(ui, &rule.style);
                     ui.horizontal(|ui| {
                         if ui.small_button("Edit").clicked() {
                             dlg.editing = Some(i);
-                            dlg.columns = Spreadsheet::column_label(rule.column);
+                            dlg.applies = rule.range.clone();
                             dlg.kind = CfKind::Custom;
                             dlg.same_row = false;
                             dlg.a = rule.predicate.clone();
@@ -1003,8 +1035,10 @@ impl GuiApp {
             ui.separator();
             ui.label(RichText::new(if dlg.editing.is_some() { "Edit rule" } else { "New rule" }).strong());
             egui::Grid::new("cf_form").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                ui.label("Columns");
-                ui.add(TextEdit::singleline(&mut dlg.columns).hint_text("B or B:D").desired_width(80.0));
+                ui.label("Applies to");
+                if ui.add(TextEdit::singleline(&mut dlg.applies).hint_text("C1, C1:D5 or B:B").desired_width(170.0)).has_focus() {
+                    dlg.picking_range = true;
+                }
                 ui.end_row();
                 ui.label("Format cells if");
                 ui.horizontal(|ui| {
@@ -1026,18 +1060,22 @@ impl GuiApp {
                         }
                         CfKind::Value(Compare::Between) => {
                             if ui.add(TextEdit::singleline(&mut dlg.a).hint_text("1 or C3").desired_width(90.0)).has_focus() {
-                                dlg.field = Field::A;
+                                (dlg.field, dlg.picking_range) = (Field::A, false);
                             }
                             ui.label("and");
                             if ui.add(TextEdit::singleline(&mut dlg.b).hint_text("10 or C4").desired_width(90.0)).has_focus() {
-                                dlg.field = Field::B;
+                                (dlg.field, dlg.picking_range) = (Field::B, false);
                             }
                         }
                         CfKind::Custom => {
-                            ui.add(TextEdit::singleline(&mut dlg.a).hint_text("_ > AVERAGE(B:B)").desired_width(220.0));
+                            if ui.add(TextEdit::singleline(&mut dlg.a).hint_text("_ > AVERAGE(B1:B100)").desired_width(220.0)).has_focus() {
+                                dlg.picking_range = false;
+                            }
                         }
                         _ => {
-                            ui.add(TextEdit::singleline(&mut dlg.a).hint_text("100, text or C3").desired_width(170.0));
+                            if ui.add(TextEdit::singleline(&mut dlg.a).hint_text("100, text or C3").desired_width(170.0)).has_focus() {
+                                dlg.picking_range = false;
+                            }
                             dlg.field = Field::A;
                         }
                     }
@@ -1051,9 +1089,11 @@ impl GuiApp {
                 }
                 // How the entry is read, so a cell isn't mistaken for text.
                 ui.label("Rule");
-                let first = parse_columns(&dlg.columns).map_or(0, |cols| *cols.start());
                 let same_row = dlg.same_row && matches!(dlg.kind, CfKind::Value(_));
-                match dlg.kind.predicate(&dlg.a, &dlg.b, same_row, first, rows) {
+                let all = CellArea::parse_list(&dlg.applies)
+                    .and_then(|areas| rule_ranges(&areas, dlg.kind.looks_at_all(), rows).into_iter().next())
+                    .map_or(String::new(), |(_, all)| all);
+                match dlg.kind.predicate(&dlg.a, &dlg.b, same_row, &all) {
                     Ok(predicate) => ui.add(egui::Label::new(RichText::new(predicate).monospace()).wrap()),
                     Err(_) => ui.label(RichText::new("…").weak()),
                 };
@@ -1070,7 +1110,8 @@ impl GuiApp {
                     "Compare with a number, text, a cell (C3, Limits!B2) or a formula such as GETPIVOTDATA(…). \
                      Click a cell in the grid or a value in a PivotTable to compare with it; \
                      put text that looks like a cell in quotes (\"Q1\"). In the rule, _ is the cell being formatted \
-                     and ROW() its row. A rule covers its whole column.",
+                     and ROW() its row. Applies to: cells as in a formula, C1, C1:D5, B:B for a whole column, \
+                     several separated by commas; or click the field and drag over the cells.",
                 )
                 .weak()
                 .small(),
@@ -1078,14 +1119,16 @@ impl GuiApp {
             error_label(ui, &dlg.error);
             if ui.button(if dlg.editing.is_some() { "Update Rule" } else { "Add Rule" }).clicked() {
                 let same_row = dlg.same_row && matches!(dlg.kind, CfKind::Value(_));
-                let new: Result<Vec<ConditionalFormat>, String> = parse_columns(&dlg.columns)
-                    .ok_or_else(|| format!("\"{}\" is not a column", dlg.columns))
-                    .and_then(|cols| {
-                        cols.map(|column| {
-                            let predicate = dlg.kind.predicate(&dlg.a, &dlg.b, same_row, column, rows)?;
-                            Ok(ConditionalFormat { column, predicate, style: dlg.style.clone() })
-                        })
-                        .collect()
+                let new: Result<Vec<ConditionalFormat>, String> = CellArea::parse_list(&dlg.applies)
+                    .ok_or_else(|| format!("\"{}\" is not a cell, range or column", dlg.applies.trim()))
+                    .and_then(|areas| {
+                        rule_ranges(&areas, dlg.kind.looks_at_all(), rows)
+                            .into_iter()
+                            .map(|(range, all)| {
+                                let predicate = dlg.kind.predicate(&dlg.a, &dlg.b, same_row, &all)?;
+                                Ok(ConditionalFormat { range, predicate, style: dlg.style.clone() })
+                            })
+                            .collect()
                     });
                 match new {
                     Ok(new) => {
@@ -1903,14 +1946,19 @@ mod tests {
 
     #[test]
     fn rules_are_built_from_the_dialog_choices() {
-        let rule = |kind: CfKind, a: &str, b: &str| kind.predicate(a, b, false, 1, 1000);
+        let rule = |kind: CfKind, a: &str, b: &str| kind.predicate(a, b, false, "B1:B1000");
         assert_eq!(rule(CfKind::Value(Compare::Greater), "100", "").unwrap(), "AND(ISNUMBER(_), _ > 100)");
         assert_eq!(rule(CfKind::Value(Compare::Equal), "say \"hi\"", "").unwrap(), "_ = \"say \"\"hi\"\"\"");
         assert_eq!(rule(CfKind::Value(Compare::Between), "1", "=B1").unwrap(), "AND(ISNUMBER(_), AND(_ >= 1, _ <= B1))");
         assert_eq!(rule(CfKind::Contains, "late", "").unwrap(), "ISNUMBER(SEARCH(\"late\", _))");
         assert!(rule(CfKind::Value(Compare::Less), " ", "").is_err());
-        assert_eq!(parse_columns("d:b"), Some(1..=3));
-        assert_eq!(parse_columns("1"), None);
+        // One rule for cells compared alone; one per area or column for
+        // rules that look at all their cells.
+        let areas = CellArea::parse_list("b:c, E2:F9").unwrap();
+        assert_eq!(rule_ranges(&areas, false, 1000), [("B:C, E2:F9".to_string(), String::new())]);
+        let all: Vec<(String, String)> =
+            [("B:B", "B1:B1000"), ("C:C", "C1:C1000"), ("E2:F9", "E2:F9")].map(|(r, a)| (r.to_string(), a.to_string())).into();
+        assert_eq!(rule_ranges(&areas, true, 1000), all);
         // Cells and function calls are recognised without "=".
         assert_eq!(rule(CfKind::Value(Compare::Less), "C3", "").unwrap(), "AND(ISNUMBER(_), ISNUMBER(C3), _ < C3)");
         assert_eq!(rule(CfKind::Value(Compare::NotEqual), "Limits!B2", "").unwrap(), "_ <> Limits!B2");
@@ -1924,7 +1972,7 @@ mod tests {
         assert_eq!(rule(CfKind::Value(Compare::Equal), "Open (late)", "").unwrap(), "_ = \"Open (late)\"");
         assert_eq!(rule(CfKind::Value(Compare::Greater), "m", "").unwrap(), "AND(NOT(ISNUMBER(_)), _ > \"m\")");
         // The same row instead of one fixed cell.
-        let same_row = |a: &str| CfKind::Value(Compare::Less).predicate(a, "", true, 1, 1000);
+        let same_row = |a: &str| CfKind::Value(Compare::Less).predicate(a, "", true, "");
         assert_eq!(
             same_row("C3").unwrap(),
             "AND(ISNUMBER(_), ISNUMBER(INDIRECT(\"C\" & ROW())), _ < INDIRECT(\"C\" & ROW()))"
@@ -1945,7 +1993,7 @@ mod tests {
         }
         let sheet = wb.current_sheet();
         let holds = |kind: CfKind, a: &str, same_row: bool| -> Vec<bool> {
-            let rule = kind.predicate(a, "", same_row, 1, 1000).unwrap();
+            let rule = kind.predicate(a, "", same_row, "B1:B1000").unwrap();
             (0..5).map(|r| sheet.predicate_holds_at(&rule, &sheet.get_cell(r, 1).value, Some(r))).collect()
         };
         assert_eq!(holds(CfKind::Value(Compare::Greater), "5", false), [false, false, true, false, true], "not the title");

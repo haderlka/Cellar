@@ -113,8 +113,10 @@ added to `app_dirs::data_locations`. `app_dirs::BUNDLE_ID` must match
 
 **Tables, rules and view state stay small.** A `Table` is a name, a range
 and its header titles; its look (header fill, banded rows) is computed by
-`Spreadsheet::table_style_for`, never stored. Conditional formats and
-validation rules are a column plus a predicate in which a lone `_` is the
+`Spreadsheet::table_style_for`, never stored. A conditional format is a
+range written as in a formula (`C1`, `C1:D5`, `B:B`, comma-separated;
+`CellArea`) plus a predicate and a style; a validation rule is a column
+plus a predicate. In a predicate a lone `_` is the
 value and `ROW()` the cell's row (`Spreadsheet::predicate_holds_at`); the
 dialogs only generate predicates (same-row comparisons, top N, dropdown
 lists as `OR(_ = …)` or `COUNTIF(range, _) > 0`, which

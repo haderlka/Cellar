@@ -38,7 +38,7 @@ pub use pivot::{
     PivotField, PivotLayout, PivotOptions, PivotSort, PivotSpec, PivotValue, ShowValuesAs, Summarize,
     TopFilter, BLANK_ITEM,
 };
-pub use spreadsheet::{Spreadsheet, Table, ConditionalFormat, SheetViewState, ChartSpec, ChartSeries, ChartType};
+pub use spreadsheet::{CellArea, Spreadsheet, Table, ConditionalFormat, SheetViewState, ChartSpec, ChartSeries, ChartType};
 pub use workbook::{migrate_workbook_json, Workbook};
 #[allow(unused_imports)]
 pub use workbook::WORKBOOK_SCHEMA_VERSION;

@@ -72,7 +72,7 @@ impl Window {
 fn grid_paints_panes_tables_comments_links_and_sparklines() {
     let mut w = Window::with_data();
     w.gui.app.add_table(((0, 0), (4, 2)), "Stock").unwrap();
-    w.gui.app.add_conditional_format(1..=1, "_ > 2", Default::default());
+    w.gui.app.add_conditional_format("B2:B5, C:C", "_ > 2", Default::default()).unwrap();
     w.enter(6, 0, "=HYPERLINK(\"https://example.com\", \"site\")");
     w.enter(6, 1, "=SPARKLINE(B2:B5)");
     w.enter(6, 2, "=SPARKLINE(C2:C5, \"column\")");

@@ -543,3 +543,34 @@ fn tables_style_their_header_and_every_second_row() {
     sheet.delete_row(2);
     assert!(sheet.tables.is_empty(), "deleting the header row removes the table");
 }
+
+#[test]
+fn conditional_format_ranges_parse_cover_and_shift() {
+    let area = |t: &str| CellArea::parse(t).unwrap();
+    assert_eq!(area("c1").label(), "C1");
+    assert_eq!(area("$D$5:c1").label(), "C1:D5");
+    assert_eq!(area("b").label(), "B:B");
+    assert_eq!(area("d:B").label(), "B:D");
+    assert_eq!(CellArea::parse("C1:D"), None);
+    assert_eq!(CellArea::parse("1:2"), None);
+    assert_eq!(CellArea::parse_list("A1, x y"), None);
+    assert!(area("B:B").contains(1_000_000, 1));
+    assert!(area("C1:D5").contains(4, 3) && !area("C1:D5").contains(5, 3));
+
+    let mut sheet = Spreadsheet::default();
+    for (r, v) in ["5", "50", "500"].iter().enumerate() {
+        sheet.set_cell(r, 2, CellData { value: v.to_string(), ..CellData::default() });
+    }
+    let bold = CellStyle { bold: true, ..CellStyle::default() };
+    sheet.conditional_formats.push(ConditionalFormat { range: "C2:C3, E1".to_string(), predicate: "_ > 1".to_string(), style: bold });
+    assert_eq!(sheet.conditional_style_for(0, 2), None, "C1 is outside the rule");
+    assert!(sheet.conditional_style_for(1, 2).is_some());
+
+    sheet.insert_row(0);
+    sheet.insert_col(0);
+    assert_eq!(sheet.conditional_formats[0].range, "D3:D4, F2");
+    sheet.delete_row(1);
+    assert_eq!(sheet.conditional_formats[0].range, "D2:D3", "F2's row is gone");
+    sheet.delete_col(3);
+    assert!(sheet.conditional_formats.is_empty(), "nothing left to format");
+}

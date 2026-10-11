@@ -65,6 +65,22 @@ pub fn migrate_workbook_json(raw: &mut serde_json::Value) -> Result<u32, String>
     // Migration matrix — currently empty. See doc comment for the pattern
     // to follow when bumping `WORKBOOK_SCHEMA_VERSION`.
 
+    // Conditional formats once named a column by index (`"column": 2`);
+    // they now name their cells (`"range": "C:C"`). Recognised by shape
+    // rather than by a version bump, which would have stamped a new
+    // version into every workbook for a field few of them use.
+    for sheet in raw.get_mut("sheets").and_then(|s| s.as_array_mut()).into_iter().flatten() {
+        for rule in sheet.get_mut("conditional_formats").and_then(|r| r.as_array_mut()).into_iter().flatten() {
+            let Some(rule) = rule.as_object_mut() else { continue };
+            if let Some(col) = rule.remove("column").and_then(|c| c.as_u64())
+                && !rule.contains_key("range")
+            {
+                let label = Spreadsheet::column_label(col as usize);
+                rule.insert("range".to_string(), serde_json::json!(format!("{}:{}", label, label)));
+            }
+        }
+    }
+
     // Stamp the current version into the value so the typed deserialize
     // below sees the migrated shape, not the source's.
     if let Some(obj) = raw.as_object_mut() {

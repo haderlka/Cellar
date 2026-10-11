@@ -579,7 +579,7 @@ impl App {
                     self.status_message = Some("(no conditional formats)".to_string());
                 } else {
                     let entries: Vec<String> = rules.iter().enumerate().map(|(i, r)| {
-                        format!("#{} col {} when {}", i, crate::domain::Spreadsheet::column_label(r.column), r.predicate)
+                        format!("#{} {} when {}", i, r.range, r.predicate)
                     }).collect();
                     self.status_message = Some(entries.join("  |  "));
                 }
